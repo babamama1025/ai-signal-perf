@@ -20,8 +20,7 @@ FONT_GREEN = Font(name='微軟正黑體', color='375623')
 FONT_RED = Font(name='微軟正黑體', color='9C0006')
 FONT_NORMAL = Font(name='微軟正黑體')
 
-METRICS = ['總停等延滯', '通過量', '平均停等延滯']
-METRIC_UNITS = {'總停等延滯': '秒', '通過量': '輛', '平均停等延滯': '秒/輛', '旅行時間': '秒'}
+from comparison_logic import LOWER_BETTER, METRIC_UNITS
 
 
 def build_comparison_xlsx(
@@ -66,14 +65,28 @@ def _build_summary_sheet(wb, all_results, before_dates, after_dates):
         ws.cell(2, c + 1).fill = FILL_SUMMARY_HDR
 
     row = 3
-    sys_cols = ['系統', '高鐵周邊', 'A19周邊', '前期範圍']
-    for metric in METRICS:
+    # 取第一個時段的第一個指標結果，從中讀取系統欄名稱（不硬編碼）
+    first_period = periods[0]
+    first_metric_df = next(
+        (v for v in all_results[first_period].values()
+         if isinstance(v, pd.DataFrame) and not v.empty and '欄位' in v.columns),
+        pd.DataFrame(),
+    )
+    # 系統總量欄：取第一個時段第一個指標的前幾筆（通常是系統層級聚合欄）
+    # 實際上系統欄由 data_loader.get_system_columns() 決定，此處從結果欄位清單取得
+    import data_loader as _dl
+    sys_col_names = _dl.get_system_columns()
+    # 轉成顯示名稱（compare_comparison 已套用 display_name，但系統欄名稱通常不需轉換）
+    sys_display = [_dl.get_display_name(c) for c in sys_col_names]
+
+    metrics_in_results = [k for k in all_results[first_period] if k != '旅行時間']
+    for metric in metrics_in_results:
         ws.cell(row, 1, f'▶ {metric}').font = FONT_WHITE_BOLD
         ws.cell(row, 1).fill = FILL_HEADER
         ws.merge_cells(start_row=row, start_column=1,
                        end_row=row, end_column=1 + len(periods) * 2)
         row += 1
-        for field in sys_cols:
+        for field in sys_display:
             ws.cell(row, 1, field).font = FONT_NORMAL
             for p, period in enumerate(periods):
                 c = col_start + p * 2
@@ -81,7 +94,6 @@ def _build_summary_sheet(wb, all_results, before_dates, after_dates):
                 r = df[df['欄位'] == field] if not df.empty else pd.DataFrame()
                 if not r.empty:
                     b, a = r['事前平均'].values[0], r['事後平均'].values[0]
-                    fmt = '{:,.0f}' if metric == '通過量' else '{:,.1f}'
                     ws.cell(row, c, b if not pd.isna(b) else None)
                     ws.cell(row, c + 1, a if not pd.isna(a) else None)
                     _apply_num_format(ws.cell(row, c), metric)
@@ -116,15 +128,18 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
         cell.alignment = Alignment(horizontal='center')
 
     row = 3
-    for metric in METRICS:
-        df = results.get(metric, pd.DataFrame())
+    # 依指標順序寫入（排除旅行時間；旅行時間接在擁有旅行時間資料的指標後面）
+    tt_df = results.get('旅行時間', pd.DataFrame())
+    tt_written = False
+    metrics_in_results = [k for k in results if k != '旅行時間']
+    for metric in metrics_in_results:
+        mdf = results.get(metric, pd.DataFrame())
         unit = METRIC_UNITS.get(metric, '')
-        row = _write_section(ws, row, f'▶ {metric} ({unit})', df, metric, FILL_HEADER)
-
-        if include_travel_time and metric == '總停等延滯':
-            tt_df = results.get('旅行時間', pd.DataFrame())
-            if not tt_df.empty:
-                row = _write_section(ws, row, '   ▶▶ 旅行時間廊道 (秒)', tt_df, '旅行時間', FILL_SUBHEADER)
+        row = _write_section(ws, row, f'▶ {metric} ({unit})', mdf, metric, FILL_HEADER)
+        # 旅行時間接在第一個有旅行時間資料的量測指標之後
+        if include_travel_time and not tt_written and not tt_df.empty:
+            row = _write_section(ws, row, '   ▶▶ 旅行時間廊道 (秒)', tt_df, '旅行時間', FILL_SUBHEADER)
+            tt_written = True
 
     # 欄寬
     ws.column_dimensions['A'].width = 30
@@ -190,8 +205,6 @@ def _write_num(cell, val, metric: str):
 
 
 def _apply_num_format(cell, metric: str):
-    if metric == '通過量':
-        cell.number_format = '#,##0'
-    else:
-        cell.number_format = '#,##0.0'
+    # LOWER_BETTER 指標為小數格式；非 LOWER_BETTER（通過量類）為整數格式
+    cell.number_format = '#,##0' if metric not in LOWER_BETTER else '#,##0.0'
     cell.font = FONT_NORMAL

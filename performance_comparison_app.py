@@ -72,10 +72,10 @@ def _load_classification():
         st.warning(f'無法讀取測試日工作表：{e}')
         return {}
 
-df       = _load_df()
+df          = _load_df()                    # 載入後自動建立欄位結構快取
 all_dates   = dl.get_available_dates(df)
 all_periods = dl.get_available_periods(df)
-system_cols = dl.get_system_columns(df)
+system_cols = dl.get_system_columns()       # 從快取取得，不需傳入 df
 cls_map     = _load_classification()
 
 
@@ -168,7 +168,7 @@ with st.sidebar:
     run_disabled = (not selected_periods or not before_dates or not after_dates)
     if st.button('🔍 執行分析', type='primary', use_container_width=True, disabled=run_disabled):
         with st.spinner('計算中…'):
-            compare_cols = df.columns[3:54].tolist() if show_detail else system_cols
+            compare_cols = dl.get_column_structure().get('all_data', system_cols) if show_detail else system_cols
             all_results = {}
             for period in selected_periods:
                 all_results[period] = cl.compute_comparison(
