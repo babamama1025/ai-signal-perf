@@ -14,6 +14,8 @@ TW_WEEKDAY = ['一', '二', '三', '四', '五', '六', '日']
 _INTERSECTION_RE = re.compile(r'^\d[\d\-]* ')
 # 短碼來向欄的識別規則：單一大寫字母，可後綴 .數字，例如 A、B.1、D.3
 _APPROACH_RE = re.compile(r'^[A-Z](\.\d+)?$')
+# 旅行時間廊道欄的識別規則：名稱含「路徑」或「->」（箭頭路段格式）
+_TT_RE = re.compile(r'路徑|->')
 
 # 模組層級快取：load_performance_csv 載入後自動填入
 _col_structure: dict | None = None
@@ -42,17 +44,15 @@ def _normalize_date(s: str) -> pd.Timestamp:
 def _detect_column_structure(df: pd.DataFrame) -> dict:
     """
     從 CSV 欄位標頭與資料樣態，自動推導：
-    - 旅行時間欄（只在一種指標中有資料）
+    - 旅行時間欄（欄名含「路徑」或「->」）
     - 系統總量欄（路口前段、不符合路口命名規則）
     - 路口群組（路口聚合欄 + 其後的來向欄）
     - 短碼來向欄的顯示名稱（2_A、6_A…）
     """
     data_cols = df.columns[3:].tolist()
 
-    # 步驟 1：偵測旅行時間欄（只有 1 種指標有非 NaN 資料）
-    metric_has_data = df.groupby('指標')[data_cols].agg(lambda x: x.notna().any())
-    n_metrics_with_data = metric_has_data.sum(axis=0)
-    tt_cols = n_metrics_with_data[n_metrics_with_data == 1].index.tolist()
+    # 步驟 1：偵測旅行時間欄（欄名含「路徑」或「->」）
+    tt_cols = [c for c in data_cols if _TT_RE.search(str(c))]
     non_tt_cols = [c for c in data_cols if c not in tt_cols]
 
     # 步驟 2：找系統總量欄（第一個路口聚合欄之前的所有欄）
