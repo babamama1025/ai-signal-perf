@@ -160,7 +160,7 @@ with st.sidebar:
 
     # 選項
     st.subheader('⚙️ 選項')
-    include_tt  = st.checkbox('包含旅行時間廊道', value=True)
+    include_tt  = st.checkbox('包含旅行時間', value=True)
     show_detail = st.checkbox('顯示各路口各方向明細', value=False)
 
     st.divider()
@@ -237,37 +237,31 @@ for i, period in enumerate(periods):
                 st.warning(f'無 {metric} 資料')
                 continue
 
-            col_tbl, col_chart = st.columns([1, 1])
-            with col_tbl:
-                display_df, raw_pct = _format_comp_df(comp_df, metric)
-                st.dataframe(
-                    display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            with col_chart:
-                st.plotly_chart(
-                    cb.make_metric_bar_chart(comp_df, metric, period),
-                    use_container_width=True,
-                )
+            display_df, raw_pct = _format_comp_df(comp_df, metric)
+            st.dataframe(
+                display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.plotly_chart(
+                cb.make_metric_bar_chart(comp_df, metric, period),
+                use_container_width=True,
+            )
 
         if inc_tt:
             tt_df = results.get('旅行時間', pd.DataFrame())
             if not tt_df.empty:
-                st.subheader('🛣️ 旅行時間廊道')
-                col_tbl2, col_chart2 = st.columns([1, 1])
-                with col_tbl2:
-                    disp_tt, raw_pct_tt = _format_comp_df(tt_df, '旅行時間')
-                    st.dataframe(
-                        disp_tt.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct_tt),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                with col_chart2:
-                    st.plotly_chart(
-                        cb.make_travel_time_chart(tt_df, period),
-                        use_container_width=True,
-                    )
+                st.subheader('🛣️ 旅行時間')
+                disp_tt, raw_pct_tt = _format_comp_df(tt_df, '旅行時間')
+                st.dataframe(
+                    disp_tt.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct_tt),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.plotly_chart(
+                    cb.make_travel_time_chart(tt_df, period),
+                    use_container_width=True,
+                )
 
 # ── Excel 匯出 ────────────────────────────────────────────────────────────────
 st.divider()

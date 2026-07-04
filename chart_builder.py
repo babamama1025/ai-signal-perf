@@ -124,7 +124,7 @@ def make_travel_time_chart(tt_df: pd.DataFrame, period: str) -> go.Figure:
         textposition='outside',
     ))
     fig.update_layout(
-        title=f"{period}  旅行時間廊道（秒）",
+        title=f"{period}  旅行時間（秒）",
         barmode='group',
         height=420,
         margin=dict(t=50, b=100, l=40, r=20),

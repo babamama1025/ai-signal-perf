@@ -179,7 +179,7 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
         row = _write_section(ws, row, f'▶ {metric} ({unit})', mdf, metric, FILL_HEADER)
         # 旅行時間接在第一個有旅行時間資料的量測指標之後
         if include_travel_time and not tt_written and not tt_df.empty:
-            row = _write_section(ws, row, '   ▶▶ 旅行時間廊道 (秒)', tt_df, '旅行時間', FILL_SUBHEADER)
+            row = _write_section(ws, row, '   ▶▶ 旅行時間 (秒)', tt_df, '旅行時間', FILL_SUBHEADER)
             tt_written = True
 
     # 欄寬
