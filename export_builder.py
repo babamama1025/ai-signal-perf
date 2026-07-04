@@ -28,18 +28,59 @@ def build_comparison_xlsx(
     before_dates: list,
     after_dates: list,
     include_travel_time: bool = True,
+    raw_df: pd.DataFrame | None = None,
+    raw_periods: list | None = None,
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
 
+    _build_info_sheet(wb, before_dates, after_dates)
     _build_summary_sheet(wb, all_results, before_dates, after_dates)
     for period, results in all_results.items():
         _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time)
+    if raw_df is not None and raw_periods:
+        _build_raw_data_sheet(wb, raw_df, before_dates, after_dates, raw_periods)
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+def _fmt_date(d) -> str:
+    _WD = ['一', '二', '三', '四', '五', '六', '日']
+    ts = d if isinstance(d, pd.Timestamp) else pd.Timestamp(d)
+    return f"{ts.strftime('%Y/%m/%d')} (週{_WD[ts.weekday()]})"
+
+
+def _build_info_sheet(wb, before_dates, after_dates):
+    from datetime import datetime
+    ws = wb.create_sheet('分析說明')
+
+    ws.merge_cells('A1:C1')
+    ws['A1'] = 'AI 號誌績效比較分析'
+    ws['A1'].font = Font(name='微軟正黑體', bold=True, size=14)
+    ws['A1'].alignment = Alignment(horizontal='center')
+
+    ws['A2'] = f"產製時間：{datetime.now().strftime('%Y/%m/%d %H:%M')}"
+    ws['A2'].font = Font(name='微軟正黑體', italic=True, color='666666')
+
+    row = 4
+    for label, dates, fill in [
+        (f'事前日期（定時時制，共 {len(before_dates)} 天）', before_dates, FILL_SUBHEADER),
+        (f'事後日期（AI 號誌，共 {len(after_dates)} 天）',   after_dates,  FILL_SUMMARY_HDR),
+    ]:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+        cell = ws.cell(row, 1, label)
+        cell.font = FONT_BOLD
+        cell.fill = fill
+        row += 1
+        for d in dates:
+            ws.cell(row, 1, _fmt_date(d)).font = FONT_NORMAL
+            row += 1
+        row += 1
+
+    ws.column_dimensions['A'].width = 28
 
 
 def _build_summary_sheet(wb, all_results, before_dates, after_dates):
@@ -148,6 +189,46 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
 
     # 凍結前兩列
     ws.freeze_panes = 'A3'
+
+
+def _build_raw_data_sheet(wb, df: pd.DataFrame, before_dates, after_dates, periods):
+    ws = wb.create_sheet('原始資料')
+
+    before_set = {pd.Timestamp(d) for d in before_dates}
+    after_set   = {pd.Timestamp(d) for d in after_dates}
+    all_date_set = before_set | after_set
+
+    raw = df[df['時段'].isin(periods) & df['日期'].isin(all_date_set)].copy()
+    raw.insert(0, '分組', raw['日期'].apply(
+        lambda d: '事前' if d in before_set else '事後'
+    ))
+    raw['日期'] = raw['日期'].apply(lambda d: d.strftime('%Y/%m/%d'))
+
+    headers = raw.columns.tolist()
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(1, c, h)
+        cell.font = FONT_WHITE_BOLD
+        cell.fill = FILL_HEADER
+        cell.alignment = Alignment(horizontal='center')
+
+    for r, (_, row_data) in enumerate(raw.iterrows(), 2):
+        for c, val in enumerate(row_data, 1):
+            cell = ws.cell(r, c)
+            if pd.isna(val):
+                cell.value = None
+            elif isinstance(val, float) and val == int(val):
+                cell.value = int(val)
+            else:
+                cell.value = val
+            cell.font = FONT_NORMAL
+
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 14
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 14
+    for i in range(5, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 11
+    ws.freeze_panes = 'A2'
 
 
 def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fill) -> int:

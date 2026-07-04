@@ -272,9 +272,19 @@ for i, period in enumerate(periods):
 # ── Excel 匯出 ────────────────────────────────────────────────────────────────
 st.divider()
 st.subheader('💾 匯出報告')
+include_raw = st.checkbox(
+    '包含原始資料工作表',
+    value=False,
+    help='勾選後，Excel 報告末頁會加入「原始資料」工作表，列出所選日期的完整數據',
+)
 if st.button('產生 Excel 報告'):
     with st.spinner('產生 Excel 中…'):
-        buf = eb.build_comparison_xlsx(all_results, bd, ad, include_travel_time=inc_tt)
+        buf = eb.build_comparison_xlsx(
+            all_results, bd, ad,
+            include_travel_time=inc_tt,
+            raw_df=df if include_raw else None,
+            raw_periods=periods if include_raw else None,
+        )
     ts = datetime.now().strftime('%Y%m%d_%H%M')
     st.download_button(
         label='⬇️ 下載 Excel 報告',
