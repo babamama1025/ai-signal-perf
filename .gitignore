@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .streamlit/
 *.tmp
+-performance_summary.csv
+=*績效*.xlsx

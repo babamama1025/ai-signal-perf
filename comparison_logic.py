@@ -174,7 +174,10 @@ def generate_analysis_text(
             if pd.isna(b) or pd.isna(a):
                 continue
             unit      = METRIC_UNITS.get(metric, '')
-            direction = '改善' if (not pd.isna(pct) and pct > 0) else '惡化'
+            if metric == '通過量':
+                direction = '增加' if (not pd.isna(pct) and pct > 0) else '減少'
+            else:
+                direction = '改善' if (not pd.isna(pct) and pct > 0) else '惡化'
             pct_str   = f"{abs(pct) * 100:.1f}%" if not pd.isna(pct) else 'N/A'
             fmt       = '{:,.0f}' if _USE_INT_FORMAT(metric) else '{:,.1f}'
             lines.append(
