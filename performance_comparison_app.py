@@ -9,9 +9,14 @@ import comparison_logic as cl
 import chart_builder as cb
 import export_builder as eb
 
+# ── 場域選項 ────────────────────────────────────────────────────────────────
+SITE_OPTIONS = {
+    '桃園四期(大湳)': 'perf_summary_4.csv',
+    '桃園三期(高鐵)': 'perf_summary_3.csv',
+}
+
 # ── 路徑設定 ────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-CSV_PATH = BASE_DIR / 'performance_summary.csv'
 XLSX_PATH = next(BASE_DIR.glob('=*績效*.xlsx'), None)
 
 # ── 頁面設定 ────────────────────────────────────────────────────────────────
@@ -57,10 +62,11 @@ def _highlight_pct_col(col_series, raw_pct: pd.Series):
     return styles
 
 
-# ── 資料載入（快取）────────────────────────────────────────────────────────
+# ── 資料載入（快取，依路徑分別快取）────────────────────────────────────────
 @st.cache_data(show_spinner='載入績效資料中…')
-def _load_df():
-    return dl.load_performance_csv(CSV_PATH)
+def _load_df(csv_path: str):
+    df = dl.load_performance_csv(Path(csv_path))
+    return df, dict(dl.get_column_structure())
 
 @st.cache_data(show_spinner='讀取測試日分類中…')
 def _load_classification():
@@ -72,10 +78,33 @@ def _load_classification():
         st.warning(f'無法讀取測試日工作表：{e}')
         return {}
 
-df          = _load_df()                    # 載入後自動建立欄位結構快取
+
+# ── 場域選擇（側邊欄最頂部，資料載入前先取得選擇）──────────────────────────
+st.sidebar.title('🚦 分析設定')
+st.sidebar.subheader('🗺️ 場域選擇')
+selected_site = st.sidebar.selectbox('選擇分析場域', list(SITE_OPTIONS.keys()))
+st.sidebar.divider()
+
+# 偵測場域切換，重置日期與分析結果
+if st.session_state.get('_current_site') != selected_site:
+    st.session_state['_current_site'] = selected_site
+    st.session_state.pop('date_df', None)
+    st.session_state.pop('analysis_results', None)
+    st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
+
+# 載入當前場域資料
+CSV_PATH = BASE_DIR / SITE_OPTIONS[selected_site]
+
+if not CSV_PATH.exists():
+    st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
+    st.stop()
+
+df, col_struct = _load_df(str(CSV_PATH))
+dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
+
 all_dates   = dl.get_available_dates(df)
 all_periods = dl.get_available_periods(df)
-system_cols = dl.get_system_columns()       # 從快取取得，不需傳入 df
+system_cols = dl.get_system_columns()
 cls_map     = _load_classification()
 
 
@@ -103,9 +132,8 @@ if 'editor_ver' not in st.session_state:
 if 'analysis_results' not in st.session_state:
     st.session_state['analysis_results'] = None
 
-# ── 側邊欄 ──────────────────────────────────────────────────────────────────
+# ── 側邊欄（其餘部分）──────────────────────────────────────────────────────
 with st.sidebar:
-    st.title('🚦 分析設定')
     st.caption(
         f'資料範圍：{all_dates[0].strftime("%Y/%m/%d")} ～ '
         f'{all_dates[-1].strftime("%Y/%m/%d")}（共 {len(all_dates)} 天）'
@@ -188,16 +216,17 @@ with st.sidebar:
         st.caption('⚠️ 請先選擇時段與事前／事後日期')
 
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
-st.title('🚦 AI 號誌績效比較分析')
+st.title(f'🚦 AI 號誌績效比較分析 ─ {selected_site}')
 
 if st.session_state['analysis_results'] is None:
     st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
     st.markdown("""
 **使用步驟：**
-1. 側邊欄的日期分配表格已依「測試日」工作表自動預填事前/事後
-2. 確認或手動調整勾選（可點「重置」還原）
-3. 選擇要分析的時段
-4. 點擊「執行分析」
+1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
+2. 確認或手動調整日期的事前／事後勾選（若有測試日工作表會自動預填，可點「重置」還原）
+3. 選擇要分析的時段（可多選）
+4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
+5. 點擊「執行分析」
 """)
     st.stop()
 
@@ -283,6 +312,6 @@ if st.button('產生 Excel 報告'):
     st.download_button(
         label='⬇️ 下載 Excel 報告',
         data=buf,
-        file_name=f'績效比較_{ts}.xlsx',
+        file_name=f'績效比較_{selected_site}_{ts}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
