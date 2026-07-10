@@ -1,8 +1,8 @@
-"""AI 號誌績效比較分析工具 (Streamlit 應用程式)"""
+"""AI 號誌事前後分析系統 (Streamlit 應用程式)"""
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import data_loader as dl
 import comparison_logic as cl
@@ -15,13 +15,28 @@ SITE_OPTIONS = {
     '桃園三期(高鐵)': 'perf_summary_3.csv',
 }
 
+# ── 場域預設時段（平日 / 假日）─────────────────────────────────────────────
+# 修改此區塊可調整各場域的預設勾選時段
+SITE_DEFAULTS = {
+    '桃園四期(大湳)': {
+        'periods_weekday': ['07:00~09:00', '14:00~16:00', '16:00~19:00'],
+        'periods_weekend': ['10:00~12:00', '16:00~19:00'],
+    },
+    '桃園三期(高鐵)': {
+        'periods_weekday': ['07:00~09:00', '14:00~16:00', '16:00~19:00'],
+        'periods_weekend': ['10:00~12:00', '16:00~19:00'],
+    },
+}
+
 # ── 路徑設定 ────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent
+BASE_DIR  = Path(__file__).parent
 XLSX_PATH = next(BASE_DIR.glob('=*績效*.xlsx'), None)
+LOG_PATH  = BASE_DIR / 'ai_operation_log.csv'   # AI 操作紀錄（可用 Excel 直接開啟編輯）
+LOG_COLS  = ['日期', '時段', '狀態', '備註']
 
 # ── 頁面設定 ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title='AI 號誌績效比較分析',
+    page_title='AI 號誌事前後分析系統',
     page_icon='🚦',
     layout='wide',
 )
@@ -29,9 +44,9 @@ st.set_page_config(
 # ── 表格格式化輔助函式 ────────────────────────────────────────────────────────
 def _format_comp_df(comp_df: pd.DataFrame, metric: str):
     """回傳（格式化後 DataFrame, 原始 改善% Series）供樣式使用。"""
-    is_vol = (metric == '通過量')
+    is_vol  = (metric == '通過量')
     raw_pct = comp_df['改善%'].copy()
-    d = comp_df.copy()
+    d       = comp_df.copy()
 
     def fmt_num(v):
         return '—' if pd.isna(v) else (f"{v:,.0f}" if is_vol else f"{v:,.1f}")
@@ -97,7 +112,7 @@ def _display_overview_table(results: dict, inc_tt: bool):
         return
 
     display_data: dict[str, list] = {}
-    raw_imp: dict[str, float] = {}
+    raw_imp: dict[str, float]     = {}
 
     for col_name, vals in col_raw.items():
         is_vol = (col_name == '通過量')
@@ -124,6 +139,20 @@ def _display_overview_table(results: dict, inc_tt: bool):
         return s
 
     st.dataframe(disp_df.style.apply(_style, axis=None), use_container_width=True)
+
+
+# ── 操作紀錄 I/O ─────────────────────────────────────────────────────────────
+def _load_log() -> pd.DataFrame:
+    if LOG_PATH.exists():
+        try:
+            return pd.read_csv(LOG_PATH, dtype=str).fillna('')
+        except Exception:
+            pass
+    return pd.DataFrame(columns=LOG_COLS)
+
+
+def _save_log(log_df: pd.DataFrame):
+    log_df.to_csv(LOG_PATH, index=False, encoding='utf-8-sig')
 
 
 # ── 資料載入（快取，依路徑分別快取）────────────────────────────────────────
@@ -173,17 +202,26 @@ cls_map     = _load_classification()
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
-def _make_date_df() -> pd.DataFrame:
+def _make_date_df(before_set: set[str] | None = None,
+                  after_set:  set[str] | None = None) -> pd.DataFrame:
+    """
+    建立日期分配 DataFrame。
+    before_set / after_set 若提供（格式 'YYYY/MM/DD'），覆蓋 XLSX 自動分類；
+    不提供時依 cls_map 判斷。
+    """
     rows = []
     for d in all_dates:
-        key = d.strftime('%Y-%m-%d')
-        c = cls_map.get(key, '未知')
+        key   = d.strftime('%Y-%m-%d')
+        d_str = d.strftime('%Y/%m/%d')
+        c     = cls_map.get(key, '未知')
+        is_before = (d_str in before_set) if before_set is not None else (c == 'FIX')
+        is_after  = (d_str in after_set)  if after_set  is not None else (c == 'AI')
         rows.append({
-            '日期': d.strftime('%Y/%m/%d'),
-            '星': dl.TW_WEEKDAY[d.weekday()],
+            '日期': d_str,
+            '星':   dl.TW_WEEKDAY[d.weekday()],
             '分類': c,
-            '事前': c == 'FIX',
-            '事後': c == 'AI',
+            '事前': is_before,
+            '事後': is_after,
         })
     return pd.DataFrame(rows)
 
@@ -204,19 +242,95 @@ with st.sidebar:
     )
     st.divider()
 
-    # 分析時段
+    # ── 日期類型（平日 / 假日）────────────────────────────────────────────
+    st.subheader('📅 日期類型')
+    day_type = st.radio(
+        '分析日期類型',
+        ['平常日（一～五）', '週末（六、日）'],
+        horizontal=True,
+        label_visibility='collapsed',
+        key='day_type_radio',
+    )
+    is_weekend = (day_type == '週末（六、日）')
+
+    st.divider()
+
+    # ── 分析時段（依場域與日期類型預設）─────────────────────────────────
     st.subheader('📅 分析時段')
-    default_periods = [p for p in ['07:00~09:00', '14:00~16:00', '16:00~19:00']
-                       if p in all_periods]
+    site_def     = SITE_DEFAULTS.get(selected_site, {})
+    default_key  = 'periods_weekend' if is_weekend else 'periods_weekday'
+    site_def_pds = site_def.get(default_key, ['07:00~09:00', '14:00~16:00', '16:00~19:00'])
+    default_periods = [p for p in site_def_pds if p in all_periods]
+
     selected_periods = st.multiselect(
         '選擇時段（可多選）',
         options=all_periods,
         default=default_periods,
+        key=f'periods_{selected_site}_{day_type}',   # 切換場域或日期類型時自動重置
     )
 
     st.divider()
 
-    # 日期分配表格
+    # ── 自動篩選日期（依 AI 操作紀錄）───────────────────────────────────
+    st.subheader('🔍 自動篩選日期')
+    st.caption('依 AI 操作紀錄與日期範圍，自動填入事前後勾選。')
+
+    range_opt = st.selectbox(
+        '日期範圍',
+        ['最近 2 週', '最近 1 個月', '最近 3 個月', '自訂區間'],
+        label_visibility='collapsed',
+        key='range_opt',
+    )
+    today = date.today()
+    if range_opt == '自訂區間':
+        col_a, col_b = st.columns(2)
+        range_start = col_a.date_input('起始', value=today - timedelta(days=30), key='range_start')
+        range_end   = col_b.date_input('結束', value=today, key='range_end')
+    else:
+        days_map    = {'最近 2 週': 14, '最近 1 個月': 30, '最近 3 個月': 90}
+        range_start = today - timedelta(days=days_map[range_opt])
+        range_end   = today
+
+    if st.button('⚡ 依操作紀錄自動填入', use_container_width=True):
+        log_df   = _load_log()
+        log_dict = dict(zip(log_df['日期'], log_df['狀態']))  # 'YYYY/MM/DD' → '啟動'/'關閉'
+
+        new_before: set[str] = set()
+        new_after:  set[str] = set()
+        ts_start = pd.Timestamp(range_start)
+        ts_end   = pd.Timestamp(range_end)
+
+        for d in all_dates:
+            if not (ts_start <= d <= ts_end):
+                continue
+            if is_weekend and d.weekday() < 5:      # 週末模式：跳過平日
+                continue
+            if not is_weekend and d.weekday() >= 5:  # 平日模式：跳過週末
+                continue
+            d_str  = d.strftime('%Y/%m/%d')
+            status = log_dict.get(d_str)
+            if status == '啟動':
+                new_after.add(d_str)
+            elif status == '關閉':
+                new_before.add(d_str)
+            else:
+                # 無操作紀錄：退回 XLSX 分類
+                c = cls_map.get(d.strftime('%Y-%m-%d'), '未知')
+                if c == 'AI':
+                    new_after.add(d_str)
+                elif c == 'FIX':
+                    new_before.add(d_str)
+
+        new_df = st.session_state['date_df'].copy()
+        new_df['事前'] = new_df['日期'].isin(new_before)
+        new_df['事後'] = new_df['日期'].isin(new_after)
+        st.session_state['date_df'] = new_df
+        st.session_state['editor_ver'] += 1
+        st.rerun()
+
+    st.divider()
+
+    # ── 日期分配表格 ────────────────────────────────────────────────────────
     st.subheader('📆 日期分配')
     st.caption('直接勾選每天歸入「事前」或「事後」。預設依測試日工作表自動分類。')
 
@@ -239,8 +353,8 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    before_dates = [all_dates[i] for i, row in edited_df.iterrows() if row['事前']]
-    after_dates  = [all_dates[i] for i, row in edited_df.iterrows() if row['事後']]
+    before_dates = [pd.Timestamp(r) for r in edited_df.loc[edited_df['事前'], '日期']]
+    after_dates  = [pd.Timestamp(r) for r in edited_df.loc[edited_df['事後'], '日期']]
     n_unk = int((edited_df['分類'] == '未知').sum())
 
     st.caption(
@@ -261,18 +375,18 @@ with st.sidebar:
     if st.button('🔍 執行分析', type='primary', use_container_width=True, disabled=run_disabled):
         with st.spinner('計算中…'):
             compare_cols = dl.get_column_structure().get('all_data', system_cols) if show_detail else system_cols
-            all_results = {}
+            all_results  = {}
             for period in selected_periods:
                 all_results[period] = cl.compute_comparison(
                     df, period, before_dates, after_dates,
                     compare_cols, include_travel_time=include_tt,
                 )
             st.session_state['analysis_results'] = {
-                'results': all_results,
+                'results':      all_results,
                 'before_dates': before_dates,
-                'after_dates': after_dates,
-                'periods': selected_periods,
-                'include_tt': include_tt,
+                'after_dates':  after_dates,
+                'periods':      selected_periods,
+                'include_tt':   include_tt,
             }
         st.success('分析完成！')
 
@@ -280,15 +394,45 @@ with st.sidebar:
         st.caption('⚠️ 請先選擇時段與事前／事後日期')
 
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
-st.title(f'🚦 AI 號誌績效比較分析 ─ {selected_site}')
+st.title(f'🚦 AI 號誌事前後分析系統 ─ {selected_site}')
+
+# ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
+with st.expander('📋 AI 操作紀錄', expanded=False):
+    st.caption(
+        f'紀錄檔：`{LOG_PATH.name}`（與程式同目錄，可用 Excel 直接開啟修改）  \n'
+        '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）'
+    )
+    log_df_ui = _load_log()
+    edited_log = st.data_editor(
+        log_df_ui,
+        column_config={
+            '日期': st.column_config.TextColumn('日期 (YYYY/MM/DD)', width='small'),
+            '時段': st.column_config.SelectboxColumn(
+                '時段', options=['全天'] + list(all_periods), width='medium'
+            ),
+            '狀態': st.column_config.SelectboxColumn(
+                '狀態', options=['啟動', '關閉'], width='small'
+            ),
+            '備註': st.column_config.TextColumn(
+                '備註（如：設備維護、颱風停班）', width='large'
+            ),
+        },
+        num_rows='dynamic',
+        use_container_width=True,
+        hide_index=True,
+        key='log_editor',
+    )
+    if st.button('💾 儲存操作紀錄', key='save_log'):
+        _save_log(edited_log)
+        st.success(f'已儲存 → {LOG_PATH}')
 
 if st.session_state['analysis_results'] is None:
     st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
     st.markdown("""
 **使用步驟：**
 1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
-2. 確認或手動調整日期的事前／事後勾選（若有測試日工作表會自動預填，可點「重置」還原）
-3. 選擇要分析的時段（可多選）
+2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
+3. 可點「⚡ 依操作紀錄自動填入」依紀錄篩選日期，或手動勾選事前／事後日期
 4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
 5. 點擊「執行分析」
 """)
