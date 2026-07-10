@@ -62,6 +62,70 @@ def _highlight_pct_col(col_series, raw_pct: pd.Series):
     return styles
 
 
+def _display_overview_table(results: dict, inc_tt: bool):
+    """系統層級改善率概覽表格（替代原概覽長條圖）。"""
+    base_metrics = ['總停等延滯', '通過量', '平均停等延滯']
+    row_labels   = ['事前平均', '事後平均', '差異', '改善(%)']
+
+    col_raw: dict[str, dict] = {}
+
+    for metric in base_metrics:
+        mdf = results.get(metric, pd.DataFrame())
+        if not mdf.empty:
+            sys_row = mdf[mdf['欄位'] == '系統']
+            if not sys_row.empty:
+                col_raw[metric] = {
+                    '事前平均': sys_row['事前平均'].values[0],
+                    '事後平均': sys_row['事後平均'].values[0],
+                    '差異':     sys_row['差異'].values[0],
+                    '改善(%)':  sys_row['改善%'].values[0],
+                }
+
+    if inc_tt:
+        tt_df = results.get('旅行時間', pd.DataFrame())
+        if not tt_df.empty:
+            for _, row in tt_df.iterrows():
+                col_raw[row['欄位']] = {
+                    '事前平均': row['事前平均'],
+                    '事後平均': row['事後平均'],
+                    '差異':     row['差異'],
+                    '改善(%)':  row['改善%'],
+                }
+
+    if not col_raw:
+        st.warning('無概覽資料')
+        return
+
+    display_data: dict[str, list] = {}
+    raw_imp: dict[str, float] = {}
+
+    for col_name, vals in col_raw.items():
+        is_vol = (col_name == '通過量')
+        def _fmt(v, vol=is_vol):
+            return '—' if pd.isna(v) else (f"{v:,.0f}" if vol else f"{v:,.1f}")
+        display_data[col_name] = [
+            _fmt(vals['事前平均']),
+            _fmt(vals['事後平均']),
+            _fmt(vals['差異']),
+            '—' if pd.isna(vals['改善(%)']) else f"{vals['改善(%)'] * 100:+.1f}%",
+        ]
+        raw_imp[col_name] = vals['改善(%)']
+
+    disp_df = pd.DataFrame(display_data, index=row_labels)
+    disp_df.index.name = None
+
+    def _style(df):
+        s = pd.DataFrame('', index=df.index, columns=df.columns)
+        for col in df.columns:
+            v = raw_imp.get(col, float('nan'))
+            if not pd.isna(v):
+                c = '#1a7a2e' if v > 0 else '#b00020'
+                s.loc['改善(%)', col] = f'color: {c}; font-weight: bold'
+        return s
+
+    st.dataframe(disp_df.style.apply(_style, axis=None), use_container_width=True)
+
+
 # ── 資料載入（快取，依路徑分別快取）────────────────────────────────────────
 @st.cache_data(show_spinner='載入績效資料中…')
 def _load_df(csv_path: str):
@@ -239,13 +303,23 @@ periods     = saved['periods']
 inc_tt      = saved['include_tt']
 
 # ── 頂部摘要指標 ──────────────────────────────────────────────────────────────
-c1, c2, c3 = st.columns(3)
-c1.metric('事前日數', f"{len(bd)} 日")
-c2.metric('事後日數', f"{len(ad)} 日")
-c3.metric('分析時段數', f"{len(periods)} 個")
+before_help  = "事前日期（共 {} 日）：\n".format(len(bd)) + \
+               "\n".join(f"• {d.strftime('%Y/%m/%d')} (週{dl.TW_WEEKDAY[d.weekday()]})" for d in bd)
+after_help   = "事後日期（共 {} 日）：\n".format(len(ad)) + \
+               "\n".join(f"• {d.strftime('%Y/%m/%d')} (週{dl.TW_WEEKDAY[d.weekday()]})" for d in ad)
+periods_help = "分析時段：\n" + "\n".join(f"• {p}" for p in periods)
 
-# ── 概覽圖 ────────────────────────────────────────────────────────────────────
-st.plotly_chart(cb.make_improvement_overview_chart(all_results), use_container_width=True)
+c1, c2, c3 = st.columns(3)
+c1.metric('事前日數', f"{len(bd)} 日", help=before_help)
+c2.metric('事後日數', f"{len(ad)} 日", help=after_help)
+c3.metric('分析時段數', f"{len(periods)} 個", help=periods_help)
+
+# ── 概覽表 ────────────────────────────────────────────────────────────────────
+st.subheader('📊 各時段系統層級改善率概覽')
+for period, results in all_results.items():
+    if len(all_results) > 1:
+        st.markdown(f"**⏱ {period}**")
+    _display_overview_table(results, inc_tt)
 
 # ── 分析摘要 ──────────────────────────────────────────────────────────────────
 with st.expander('📝 分析摘要（展開）', expanded=True):
