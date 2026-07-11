@@ -14,7 +14,9 @@ TW_WEEKDAY = ['一', '二', '三', '四', '五', '六', '日']
 _INTERSECTION_RE = re.compile(r'^\d[\d\-]* ')
 # 短碼來向欄的識別規則：單一大寫字母，可後綴 .數字，例如 A、B.1、D.3
 _APPROACH_RE = re.compile(r'^[A-Z](\.\d+)?$')
-# 旅行時間廊道欄的識別規則：名稱含「路徑」或「->」（箭頭路段格式）
+# 旅行時間廊道欄的識別規則：
+#   四期格式：欄名含「路徑」或「->」
+#   三期格式：欄名含破折號「-」，但不是路口編號範圍（如「4-5 台31/...」開頭的格式）
 _TT_RE = re.compile(r'路徑|->')
 
 # 模組層級快取：load_performance_csv 載入後自動填入
@@ -51,8 +53,14 @@ def _detect_column_structure(df: pd.DataFrame) -> dict:
     """
     data_cols = df.columns[3:].tolist()
 
-    # 步驟 1：偵測旅行時間欄（欄名含「路徑」或「->」）
-    tt_cols = [c for c in data_cols if _TT_RE.search(str(c))]
+    # 步驟 1：偵測旅行時間廊道欄
+    # 四期格式：含「路徑」或「->」
+    # 三期格式：含「-」（破折號），但排除以數字範圍開頭的路口欄，如「4-5 台31/...」
+    def _is_tt(col: str) -> bool:
+        s = str(col)
+        return bool(_TT_RE.search(s)) or ('-' in s and not _INTERSECTION_RE.match(s))
+
+    tt_cols = [c for c in data_cols if _is_tt(c)]
     non_tt_cols = [c for c in data_cols if c not in tt_cols]
 
     # 步驟 2：找系統總量欄（第一個路口聚合欄之前的所有欄）
