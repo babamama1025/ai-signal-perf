@@ -31,8 +31,13 @@ SITE_DEFAULTS = {
 # ── 路徑設定 ────────────────────────────────────────────────────────────────
 BASE_DIR  = Path(__file__).parent
 XLSX_PATH = next(BASE_DIR.glob('=*績效*.xlsx'), None)
-LOG_PATH  = BASE_DIR / 'ai_operation_log.csv'   # AI 操作紀錄（可用 Excel 直接開啟編輯）
 LOG_COLS  = ['日期', '時段', '狀態', '備註']
+
+# 各場域獨立的 AI 操作紀錄檔（可用 Excel 直接開啟編輯）
+LOG_PATHS = {
+    '桃園四期(大湳)': 'ai_operation_log_4.csv',
+    '桃園三期(高鐵)': 'ai_operation_log_3.csv',
+}
 
 # ── 頁面設定 ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -187,6 +192,7 @@ if st.session_state.get('_current_site') != selected_site:
 
 # 載入當前場域資料
 CSV_PATH = BASE_DIR / SITE_OPTIONS[selected_site]
+LOG_PATH = BASE_DIR / LOG_PATHS[selected_site]
 
 if not CSV_PATH.exists():
     st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
@@ -394,7 +400,8 @@ with st.sidebar:
         st.caption('⚠️ 請先選擇時段與事前／事後日期')
 
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
-st.title(f'🚦 AI 號誌事前後分析系統 ─ {selected_site}')
+st.title('🚦 AI 號誌事前後分析系統')
+st.subheader(f'場域：{selected_site}')
 
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
 with st.expander('📋 AI 操作紀錄', expanded=False):
