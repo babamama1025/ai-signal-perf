@@ -147,27 +147,3 @@ def get_metrics(df: pd.DataFrame) -> list[str]:
 
 def format_date(ts: pd.Timestamp) -> str:
     return f"{ts.strftime('%Y/%m/%d')} (週{TW_WEEKDAY[ts.weekday()]})"
-
-
-# ── 選用：從 Excel 測試日工作表匯入日期分類 ──────────────────────────────────
-def load_test_day_classification(xlsx_path: str | Path) -> dict[str, str]:
-    """
-    讀取「測試日」工作表，回傳 {date_str: 'AI'|'FIX'}。
-    此為選用功能；若 xlsx 不存在，呼叫端應回退至全手動分類。
-    """
-    import openpyxl
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    ws = wb['測試日']
-    result = {}
-    for row in ws.iter_rows(values_only=True, min_row=3):
-        if not row or row[1] is None:
-            continue
-        date_val = row[1]
-        date_str = (date_val.strftime('%Y-%m-%d')
-                    if hasattr(date_val, 'strftime')
-                    else str(date_val)[:10])
-        # cols 3-10: 前1, 前2, 前3, A1, A2, A3, A4, A5
-        flags = [row[i] for i in range(3, 11) if i < len(row)]
-        result[date_str] = 'AI' if any(str(f) == 'True' for f in flags if f is not None) else 'FIX'
-    wb.close()
-    return result

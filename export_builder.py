@@ -25,8 +25,8 @@ from comparison_logic import LOWER_BETTER, METRIC_UNITS
 
 def build_comparison_xlsx(
     all_results: dict[str, dict[str, pd.DataFrame]],
-    before_dates: list,
-    after_dates: list,
+    before_by_period: dict[str, list],
+    after_by_period: dict[str, list],
     include_travel_time: bool = True,
     raw_df: pd.DataFrame | None = None,
     raw_periods: list | None = None,
@@ -34,12 +34,16 @@ def build_comparison_xlsx(
     wb = Workbook()
     wb.remove(wb.active)
 
-    _build_info_sheet(wb, before_dates, after_dates)
-    _build_summary_sheet(wb, all_results, before_dates, after_dates)
+    _build_info_sheet(wb, before_by_period, after_by_period)
+    _build_summary_sheet(wb, all_results, before_by_period, after_by_period)
     for period, results in all_results.items():
-        _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time)
+        _build_period_sheet(
+            wb, period, results,
+            before_by_period.get(period, []), after_by_period.get(period, []),
+            include_travel_time,
+        )
     if raw_df is not None and raw_periods:
-        _build_raw_data_sheet(wb, raw_df, before_dates, after_dates, raw_periods)
+        _build_raw_data_sheet(wb, raw_df, before_by_period, after_by_period, raw_periods)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -53,7 +57,7 @@ def _fmt_date(d) -> str:
     return f"{ts.strftime('%Y/%m/%d')} (週{_WD[ts.weekday()]})"
 
 
-def _build_info_sheet(wb, before_dates, after_dates):
+def _build_info_sheet(wb, before_by_period, after_by_period):
     from datetime import datetime
     ws = wb.create_sheet('分析說明')
 
@@ -66,24 +70,31 @@ def _build_info_sheet(wb, before_dates, after_dates):
     ws['A2'].font = Font(name='微軟正黑體', italic=True, color='666666')
 
     row = 4
-    for label, dates, fill in [
-        (f'事前日期（定時時制，共 {len(before_dates)} 天）', before_dates, FILL_SUBHEADER),
-        (f'事後日期（AI 號誌，共 {len(after_dates)} 天）',   after_dates,  FILL_SUMMARY_HDR),
-    ]:
+    for period in before_by_period:
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
-        cell = ws.cell(row, 1, label)
-        cell.font = FONT_BOLD
-        cell.fill = fill
+        cell = ws.cell(row, 1, f'⏱ {period}')
+        cell.font = FONT_WHITE_BOLD
+        cell.fill = FILL_HEADER
         row += 1
-        for d in dates:
-            ws.cell(row, 1, _fmt_date(d)).font = FONT_NORMAL
+        for label, dates, fill in [
+            (f'事前日期（定時時制，共 {len(before_by_period[period])} 天）', before_by_period[period], FILL_SUBHEADER),
+            (f'事後日期（AI 號誌，共 {len(after_by_period[period])} 天）',   after_by_period[period],  FILL_SUMMARY_HDR),
+        ]:
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+            cell = ws.cell(row, 1, label)
+            cell.font = FONT_BOLD
+            cell.fill = fill
+            row += 1
+            for d in dates:
+                ws.cell(row, 1, _fmt_date(d)).font = FONT_NORMAL
+                row += 1
             row += 1
         row += 1
 
     ws.column_dimensions['A'].width = 28
 
 
-def _build_summary_sheet(wb, all_results, before_dates, after_dates):
+def _build_summary_sheet(wb, all_results, before_by_period, after_by_period):
     ws = wb.create_sheet('總表')
     periods = list(all_results.keys())
 
@@ -96,8 +107,10 @@ def _build_summary_sheet(wb, all_results, before_dates, after_dates):
     col_start = 2
     for p, period in enumerate(periods):
         c = col_start + p * 2
+        n_before = len(before_by_period.get(period, []))
+        n_after  = len(after_by_period.get(period, []))
         ws.merge_cells(start_row=1, start_column=c, end_row=1, end_column=c + 1)
-        ws.cell(1, c, period).font = FONT_BOLD
+        ws.cell(1, c, f'{period}（前{n_before}/後{n_after}）').font = FONT_BOLD
         ws.cell(1, c).fill = FILL_SUMMARY_HDR
         ws.cell(1, c).alignment = Alignment(horizontal='center')
         ws.cell(2, c, '事前平均').font = FONT_BOLD
@@ -146,8 +159,8 @@ def _build_summary_sheet(wb, all_results, before_dates, after_dates):
     for col in range(2, 2 + len(periods) * 2):
         ws.column_dimensions[get_column_letter(col)].width = 14
 
-    # 說明
-    ws.cell(row + 1, 1, f'事前：{len(before_dates)} 日  事後：{len(after_dates)} 日').font = Font(italic=True, color='666666')
+    # 說明（各時段事前／事後天數已列於欄標題）
+    ws.cell(row + 1, 1, '各時段事前／事後天數詳見欄標題；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
 
 
 def _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time):
@@ -191,17 +204,20 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
     ws.freeze_panes = 'A3'
 
 
-def _build_raw_data_sheet(wb, df: pd.DataFrame, before_dates, after_dates, periods):
+def _build_raw_data_sheet(wb, df: pd.DataFrame, before_by_period, after_by_period, periods):
     ws = wb.create_sheet('原始資料')
 
-    before_set = {pd.Timestamp(d) for d in before_dates}
-    after_set   = {pd.Timestamp(d) for d in after_dates}
-    all_date_set = before_set | after_set
-
-    raw = df[df['時段'].isin(periods) & df['日期'].isin(all_date_set)].copy()
-    raw.insert(0, '分組', raw['日期'].apply(
-        lambda d: '事前' if d in before_set else '事後'
-    ))
+    parts = []
+    for period in periods:
+        before_set = {pd.Timestamp(d) for d in before_by_period.get(period, [])}
+        after_set  = {pd.Timestamp(d) for d in after_by_period.get(period, [])}
+        date_set   = before_set | after_set
+        sub = df[(df['時段'] == period) & (df['日期'].isin(date_set))].copy()
+        sub.insert(0, '分組', sub['日期'].apply(
+            lambda d: '事前' if d in before_set else '事後'
+        ))
+        parts.append(sub)
+    raw = pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0].copy()
     raw['日期'] = raw['日期'].apply(lambda d: d.strftime('%Y/%m/%d'))
 
     headers = raw.columns.tolist()

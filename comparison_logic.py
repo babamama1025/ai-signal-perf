@@ -155,13 +155,16 @@ def _improvement_pct(before: float, after: float, metric: str) -> float:
 
 def generate_analysis_text(
     all_results: dict[str, dict[str, pd.DataFrame]],
-    before_count: int,
-    after_count: int,
+    before_counts: dict[str, int],
+    after_counts: dict[str, int],
 ) -> str:
-    lines = [
-        f"本次分析共選取 **{before_count}** 個事前（定時時制）日、"
-        f"**{after_count}** 個事後（AI 號誌）日。\n"
-    ]
+    lines = ["本次分析各時段選取天數（事前 = 定時時制、事後 = AI 號誌）：\n"]
+    for period in all_results:
+        lines.append(
+            f"- **{period}**：事前 **{before_counts.get(period, 0)}** 日、"
+            f"事後 **{after_counts.get(period, 0)}** 日"
+        )
+    lines.append("")
     for period, results in all_results.items():
         lines.append(f"\n### {period} 時段\n")
         for metric, mdf in results.items():

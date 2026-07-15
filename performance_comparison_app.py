@@ -30,7 +30,6 @@ SITE_DEFAULTS = {
 
 # ── 路徑設定 ────────────────────────────────────────────────────────────────
 BASE_DIR  = Path(__file__).parent
-XLSX_PATH = next(BASE_DIR.glob('=*績效*.xlsx'), None)
 LOG_COLS  = ['日期', '時段', '狀態', '備註']
 
 # 各場域獨立的 AI 操作紀錄檔（可用 Excel 直接開啟編輯）
@@ -160,21 +159,43 @@ def _save_log(log_df: pd.DataFrame):
     log_df.to_csv(LOG_PATH, index=False, encoding='utf-8-sig')
 
 
+def _validate_log_periods(log_df: pd.DataFrame, all_periods: list[str]) -> list[str]:
+    """檢查操作紀錄的「時段」欄是否為合法值，回傳錯誤訊息列表（空list代表通過）。
+    時段、狀態皆空白的列視為純備註列（如颱風停班說明），不強制檢查。"""
+    valid = {'全天', *all_periods}
+    errors = []
+    for i, (period, status) in enumerate(zip(log_df['時段'], log_df['狀態']), start=1):
+        period = (period or '').strip()
+        status = (status or '').strip()
+        if not period and not status:
+            continue
+        if not period:
+            errors.append(f'第 {i} 列：已填寫狀態但時段未填寫')
+        elif period not in valid:
+            errors.append(f'第 {i} 列：「{period}」不是有效時段（需為「全天」或：{"、".join(all_periods)}）')
+    return errors
+
+
+def _period_status_map(log_df: pd.DataFrame, periods: list[str]) -> dict[tuple[str, str], str]:
+    """由 AI 操作紀錄建立 {(日期, 時段): 狀態} 對照表（僅限 periods 內的時段）。
+    「全天」列先展開套用到 periods 內所有時段，同日期同時段的個別列再覆蓋（較明確者優先）。"""
+    status: dict[tuple[str, str], str] = {}
+    records = log_df.to_dict('records')
+    for r in records:
+        if r.get('時段') == '全天' and r.get('狀態') in ('啟動', '關閉'):
+            for p in periods:
+                status[(r['日期'], p)] = r['狀態']
+    for r in records:
+        if r.get('時段') in periods and r.get('狀態') in ('啟動', '關閉'):
+            status[(r['日期'], r['時段'])] = r['狀態']
+    return status
+
+
 # ── 資料載入（快取，依路徑分別快取）────────────────────────────────────────
 @st.cache_data(show_spinner='載入績效資料中…')
 def _load_df(csv_path: str):
     df = dl.load_performance_csv(Path(csv_path))
     return df, dict(dl.get_column_structure())
-
-@st.cache_data(show_spinner='讀取測試日分類中…')
-def _load_classification():
-    if XLSX_PATH is None:
-        return {}
-    try:
-        return dl.load_test_day_classification(XLSX_PATH)
-    except Exception as e:
-        st.warning(f'無法讀取測試日工作表：{e}')
-        return {}
 
 
 # ── 場域選擇（側邊欄最頂部，資料載入前先取得選擇）──────────────────────────
@@ -204,37 +225,32 @@ dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.c
 all_dates   = dl.get_available_dates(df)
 all_periods = dl.get_available_periods(df)
 system_cols = dl.get_system_columns()
-cls_map     = _load_classification()
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
-def _make_date_df(before_set: set[str] | None = None,
-                  after_set:  set[str] | None = None) -> pd.DataFrame:
+def _make_date_period_df(periods: list[str], log_df: pd.DataFrame) -> pd.DataFrame:
     """
-    建立日期分配 DataFrame。
-    before_set / after_set 若提供（格式 'YYYY/MM/DD'），覆蓋 XLSX 自動分類；
-    不提供時依 cls_map 判斷。
+    建立「日期 × 時段」分配表（長格式，每列為一個日期＋時段組合）。
+    狀態完全依 AI 操作紀錄判斷：啟動 → 事後；關閉或無紀錄 → 事前
+    （無操作紀錄視為預設開啟定時時制 TOD）。
     """
+    status_map = _period_status_map(log_df, periods)
     rows = []
     for d in all_dates:
-        key   = d.strftime('%Y-%m-%d')
         d_str = d.strftime('%Y/%m/%d')
-        c     = cls_map.get(key, '未知')
-        is_before = (d_str in before_set) if before_set is not None else (c == 'FIX')
-        is_after  = (d_str in after_set)  if after_set  is not None else (c == 'AI')
-        rows.append({
-            '日期': d_str,
-            '星':   dl.TW_WEEKDAY[d.weekday()],
-            '分類': c,
-            '事前': is_before,
-            '事後': is_after,
-        })
-    return pd.DataFrame(rows)
+        for p in periods:
+            status = status_map.get((d_str, p), '關閉')
+            rows.append({
+                '日期': d_str,
+                '星':   dl.TW_WEEKDAY[d.weekday()],
+                '時段': p,
+                '事前': status == '關閉',
+                '事後': status == '啟動',
+            })
+    return pd.DataFrame(rows, columns=['日期', '星', '時段', '事前', '事後'])
 
 
 # ── Session State 初始化 ────────────────────────────────────────────────────
-if 'date_df' not in st.session_state:
-    st.session_state['date_df'] = _make_date_df()
 if 'editor_ver' not in st.session_state:
     st.session_state['editor_ver'] = 0
 if 'analysis_results' not in st.session_state:
@@ -275,11 +291,18 @@ with st.sidebar:
         key=f'periods_{selected_site}_{day_type}',   # 切換場域或日期類型時自動重置
     )
 
+    # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
+    periods_key = (selected_site, tuple(sorted(selected_periods)))
+    if st.session_state.get('_periods_key') != periods_key:
+        st.session_state['_periods_key'] = periods_key
+        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
+        st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
+
     st.divider()
 
     # ── 自動篩選日期（依 AI 操作紀錄）───────────────────────────────────
     st.subheader('🔍 自動篩選日期')
-    st.caption('依 AI 操作紀錄與日期範圍，自動填入事前後勾選。')
+    st.caption('依 AI 操作紀錄，將指定日期範圍與日期類型內的天數自動歸類；範圍外或類型不符的天數會取消勾選。')
 
     range_opt = st.selectbox(
         '日期範圍',
@@ -298,38 +321,22 @@ with st.sidebar:
         range_end   = today
 
     if st.button('⚡ 依操作紀錄自動填入', use_container_width=True):
-        log_df   = _load_log()
-        log_dict = dict(zip(log_df['日期'], log_df['狀態']))  # 'YYYY/MM/DD' → '啟動'/'關閉'
-
-        new_before: set[str] = set()
-        new_after:  set[str] = set()
+        status_map = _period_status_map(_load_log(), selected_periods)
         ts_start = pd.Timestamp(range_start)
         ts_end   = pd.Timestamp(range_end)
 
-        for d in all_dates:
-            if not (ts_start <= d <= ts_end):
-                continue
-            if is_weekend and d.weekday() < 5:      # 週末模式：跳過平日
-                continue
-            if not is_weekend and d.weekday() >= 5:  # 平日模式：跳過週末
-                continue
-            d_str  = d.strftime('%Y/%m/%d')
-            status = log_dict.get(d_str)
-            if status == '啟動':
-                new_after.add(d_str)
-            elif status == '關閉':
-                new_before.add(d_str)
-            else:
-                # 無操作紀錄：退回 XLSX 分類
-                c = cls_map.get(d.strftime('%Y-%m-%d'), '未知')
-                if c == 'AI':
-                    new_after.add(d_str)
-                elif c == 'FIX':
-                    new_before.add(d_str)
-
         new_df = st.session_state['date_df'].copy()
-        new_df['事前'] = new_df['日期'].isin(new_before)
-        new_df['事後'] = new_df['日期'].isin(new_after)
+        for idx, row in new_df.iterrows():
+            d = pd.Timestamp(row['日期'])
+            in_scope = (ts_start <= d <= ts_end) and ((d.weekday() >= 5) == is_weekend)
+            if in_scope:
+                status = status_map.get((row['日期'], row['時段']), '關閉')
+                new_df.at[idx, '事前'] = (status == '關閉')
+                new_df.at[idx, '事後'] = (status == '啟動')
+            else:
+                new_df.at[idx, '事前'] = False
+                new_df.at[idx, '事後'] = False
+
         st.session_state['date_df'] = new_df
         st.session_state['editor_ver'] += 1
         st.rerun()
@@ -338,11 +345,15 @@ with st.sidebar:
 
     # ── 日期分配表格 ────────────────────────────────────────────────────────
     st.subheader('📆 日期分配')
-    st.caption('直接勾選每天歸入「事前」或「事後」。預設依測試日工作表自動分類。')
+    st.caption(
+        '每列為一組「日期＋時段」，直接勾選歸入「事前」或「事後」。'
+        '預設依 AI 操作紀錄判斷：無紀錄視為開啟定時時制（事前）。'
+    )
 
-    if st.button('↺ 重置為測試日分類', use_container_width=True):
-        st.session_state['date_df'] = _make_date_df()
+    if st.button('↺ 重置為 AI 操作紀錄預設值', use_container_width=True):
+        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
         st.session_state['editor_ver'] += 1
+        st.rerun()
 
     edited_df = st.data_editor(
         st.session_state['date_df'],
@@ -350,7 +361,7 @@ with st.sidebar:
         column_config={
             '日期': st.column_config.TextColumn('日期', disabled=True, width='small'),
             '星':  st.column_config.TextColumn('星', disabled=True, width='small'),
-            '分類': st.column_config.TextColumn('分類', disabled=True, width='small'),
+            '時段': st.column_config.TextColumn('時段', disabled=True, width='medium'),
             '事前': st.column_config.CheckboxColumn('事前', width='small'),
             '事後': st.column_config.CheckboxColumn('事後', width='small'),
         },
@@ -359,14 +370,19 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    before_dates = [pd.Timestamp(r) for r in edited_df.loc[edited_df['事前'], '日期']]
-    after_dates  = [pd.Timestamp(r) for r in edited_df.loc[edited_df['事後'], '日期']]
-    n_unk = int((edited_df['分類'] == '未知').sum())
+    before_by_period: dict[str, list] = {}
+    after_by_period:  dict[str, list] = {}
+    for p in selected_periods:
+        sub = edited_df[edited_df['時段'] == p]
+        before_by_period[p] = [pd.Timestamp(r) for r in sub.loc[sub['事前'], '日期']]
+        after_by_period[p]  = [pd.Timestamp(r) for r in sub.loc[sub['事後'], '日期']]
 
-    st.caption(
-        f'已選：事前 **{len(before_dates)}** 日 ／ 事後 **{len(after_dates)}** 日'
-        + (f'  ⚠️ 另有 {n_unk} 天未分類' if n_unk else '')
-    )
+    if selected_periods:
+        counts_str = '　'.join(
+            f"{p}：事前{len(before_by_period[p])}／事後{len(after_by_period[p])}"
+            for p in selected_periods
+        )
+        st.caption(f'已選：{counts_str}')
 
     st.divider()
 
@@ -377,27 +393,31 @@ with st.sidebar:
 
     st.divider()
 
-    run_disabled = (not selected_periods or not before_dates or not after_dates)
+    usable_periods = [p for p in selected_periods if before_by_period[p] and after_by_period[p]]
+    run_disabled = (not selected_periods or not usable_periods)
     if st.button('🔍 執行分析', type='primary', use_container_width=True, disabled=run_disabled):
         with st.spinner('計算中…'):
             compare_cols = dl.get_column_structure().get('all_data', system_cols) if show_detail else system_cols
             all_results  = {}
             for period in selected_periods:
                 all_results[period] = cl.compute_comparison(
-                    df, period, before_dates, after_dates,
+                    df, period, before_by_period[period], after_by_period[period],
                     compare_cols, include_travel_time=include_tt,
                 )
             st.session_state['analysis_results'] = {
-                'results':      all_results,
-                'before_dates': before_dates,
-                'after_dates':  after_dates,
-                'periods':      selected_periods,
-                'include_tt':   include_tt,
+                'results':          all_results,
+                'before_by_period': before_by_period,
+                'after_by_period':  after_by_period,
+                'periods':          selected_periods,
+                'include_tt':       include_tt,
             }
         st.success('分析完成！')
 
     if run_disabled:
-        st.caption('⚠️ 請先選擇時段與事前／事後日期')
+        st.caption('⚠️ 請先選擇時段，且至少一個時段同時有事前與事後日期')
+    elif len(usable_periods) < len(selected_periods):
+        missing = [p for p in selected_periods if p not in usable_periods]
+        st.caption(f'⚠️ 以下時段缺少事前或事後日期，分析結果將留白：{"、".join(missing)}')
 
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
 st.title('🚦 AI 號誌事前後分析系統')
@@ -407,15 +427,16 @@ st.subheader(f'場域：{selected_site}')
 with st.expander('📋 AI 操作紀錄', expanded=False):
     st.caption(
         f'紀錄檔：`{LOG_PATH.name}`（與程式同目錄，可用 Excel 直接開啟修改）  \n'
-        '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）'
+        '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
+        f'**時段**欄請填「全天」或以下其中之一：{"、".join(all_periods)}'
     )
     log_df_ui = _load_log()
     edited_log = st.data_editor(
         log_df_ui,
         column_config={
             '日期': st.column_config.TextColumn('日期 (YYYY/MM/DD)', width='small'),
-            '時段': st.column_config.SelectboxColumn(
-                '時段', options=['全天'] + list(all_periods), width='medium'
+            '時段': st.column_config.TextColumn(
+                '時段（全天 或 HH:MM~HH:MM）', width='medium'
             ),
             '狀態': st.column_config.SelectboxColumn(
                 '狀態', options=['啟動', '關閉'], width='small'
@@ -430,8 +451,12 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
         key='log_editor',
     )
     if st.button('💾 儲存操作紀錄', key='save_log'):
-        _save_log(edited_log)
-        st.success(f'已儲存 → {LOG_PATH}')
+        errors = _validate_log_periods(edited_log, all_periods)
+        if errors:
+            st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
+        else:
+            _save_log(edited_log)
+            st.success(f'已儲存 → {LOG_PATH}')
 
 if st.session_state['analysis_results'] is None:
     st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
@@ -439,31 +464,27 @@ if st.session_state['analysis_results'] is None:
 **使用步驟：**
 1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
 2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
-3. 可點「⚡ 依操作紀錄自動填入」依紀錄篩選日期，或手動勾選事前／事後日期
+3. 「日期分配」表已依「AI 操作紀錄」自動判斷各日期＋時段的事前／事後（無紀錄視為定時時制／事前），
+   可視需要用「⚡ 依操作紀錄自動填入」限縮至特定日期範圍，或直接手動勾選
 4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
 5. 點擊「執行分析」
 """)
     st.stop()
 
 # 取出分析結果
-saved       = st.session_state['analysis_results']
-all_results = saved['results']
-bd          = saved['before_dates']
-ad          = saved['after_dates']
-periods     = saved['periods']
-inc_tt      = saved['include_tt']
+saved           = st.session_state['analysis_results']
+all_results     = saved['results']
+bd_by_period    = saved['before_by_period']
+ad_by_period    = saved['after_by_period']
+periods         = saved['periods']
+inc_tt          = saved['include_tt']
 
-# ── 頂部摘要指標 ──────────────────────────────────────────────────────────────
-before_help  = "事前日期（共 {} 日）：\n".format(len(bd)) + \
-               "\n".join(f"• {d.strftime('%Y/%m/%d')} (週{dl.TW_WEEKDAY[d.weekday()]})" for d in bd)
-after_help   = "事後日期（共 {} 日）：\n".format(len(ad)) + \
-               "\n".join(f"• {d.strftime('%Y/%m/%d')} (週{dl.TW_WEEKDAY[d.weekday()]})" for d in ad)
-periods_help = "分析時段：\n" + "\n".join(f"• {p}" for p in periods)
-
-c1, c2, c3 = st.columns(3)
-c1.metric('事前日數', f"{len(bd)} 日", help=before_help)
-c2.metric('事後日數', f"{len(ad)} 日", help=after_help)
-c3.metric('分析時段數', f"{len(periods)} 個", help=periods_help)
+# ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
+summary_rows = [
+    {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
+    for p in periods
+]
+st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
 # ── 概覽表 ────────────────────────────────────────────────────────────────────
 st.subheader('📊 各時段系統層級改善率概覽')
@@ -474,7 +495,9 @@ for period, results in all_results.items():
 
 # ── 分析摘要 ──────────────────────────────────────────────────────────────────
 with st.expander('📝 分析摘要（展開）', expanded=True):
-    st.markdown(cl.generate_analysis_text(all_results, len(bd), len(ad)))
+    before_counts = {p: len(bd_by_period[p]) for p in periods}
+    after_counts  = {p: len(ad_by_period[p]) for p in periods}
+    st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
 
 st.divider()
 
@@ -528,7 +551,7 @@ include_raw = st.checkbox(
 if st.button('產生 Excel 報告'):
     with st.spinner('產生 Excel 中…'):
         buf = eb.build_comparison_xlsx(
-            all_results, bd, ad,
+            all_results, bd_by_period, ad_by_period,
             include_travel_time=inc_tt,
             raw_df=df if include_raw else None,
             raw_periods=periods if include_raw else None,
