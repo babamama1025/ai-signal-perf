@@ -1,4 +1,6 @@
 """AI 號誌事前後分析系統 (Streamlit 應用程式)"""
+import re
+import json
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -19,8 +21,8 @@ SITE_OPTIONS = {
 # 修改此區塊可調整各場域的預設勾選時段
 SITE_DEFAULTS = {
     '桃園四期(大湳)': {
-        'periods_weekday': ['07:00~09:00', '14:00~16:00', '16:00~19:00'],
-        'periods_weekend': ['10:00~12:00', '16:00~19:00'],
+        'periods_weekday': ['07:00~09:00', '12:00~14:00', '17:00~19:00'],
+        'periods_weekend': ['10:00~12:00', '11:00~12:00', '17:30~18:30', '17:00~19:00'],
     },
     '桃園三期(高鐵)': {
         'periods_weekday': ['07:00~09:00', '14:00~16:00', '16:00~19:00'],
@@ -28,14 +30,27 @@ SITE_DEFAULTS = {
     },
 }
 
+def _esc_md(text: str) -> str:
+    """跳脫字串中的 '~'，避免多個時段字串（如 07:00~09:00）併入同一行文字時，
+    奇數個 '~' 被 Markdown 誤判成刪除線的起訖點。"""
+    return text.replace('~', '\\~')
+
+
 # ── 路徑設定 ────────────────────────────────────────────────────────────────
 BASE_DIR  = Path(__file__).parent
+DATA_DIR  = BASE_DIR / 'data'
 LOG_COLS  = ['日期', '時段', '狀態', '備註']
 
 # 各場域獨立的 AI 操作紀錄檔（可用 Excel 直接開啟編輯）
 LOG_PATHS = {
     '桃園四期(大湳)': 'ai_operation_log_4.csv',
     '桃園三期(高鐵)': 'ai_operation_log_3.csv',
+}
+
+# 各場域獨立的已儲存日期分配檔
+SELECTION_PATHS = {
+    '桃園四期(大湳)': 'date_selections_4.json',
+    '桃園三期(高鐵)': 'date_selections_3.json',
 }
 
 # ── 頁面設定 ────────────────────────────────────────────────────────────────
@@ -159,10 +174,37 @@ def _save_log(log_df: pd.DataFrame):
     log_df.to_csv(LOG_PATH, index=False, encoding='utf-8-sig')
 
 
-def _validate_log_periods(log_df: pd.DataFrame, all_periods: list[str]) -> list[str]:
+def _load_selections(path: Path) -> list[dict]:
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding='utf-8-sig'))
+        except Exception:
+            pass
+    return []
+
+
+def _save_selections(path: Path, selections: list[dict]):
+    path.write_text(json.dumps(selections, ensure_ascii=False, indent=2), encoding='utf-8-sig')
+
+
+def _parse_period(period: str) -> tuple[int, int] | None:
+    """解析「HH:MM~HH:MM」為 (起始分鐘, 結束分鐘)；格式錯誤或起始未早於結束則回傳 None。"""
+    m = re.match(r'^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})$', period.strip())
+    if not m:
+        return None
+    h1, m1, h2, m2 = (int(x) for x in m.groups())
+    if not (0 <= h1 <= 24 and 0 <= m1 < 60 and 0 <= h2 <= 24 and 0 <= m2 < 60):
+        return None
+    start, end = h1 * 60 + m1, h2 * 60 + m2
+    if start >= end:
+        return None
+    return start, end
+
+
+def _validate_log_periods(log_df: pd.DataFrame) -> list[str]:
     """檢查操作紀錄的「時段」欄是否為合法值，回傳錯誤訊息列表（空list代表通過）。
-    時段、狀態皆空白的列視為純備註列（如颱風停班說明），不強制檢查。"""
-    valid = {'全天', *all_periods}
+    時段、狀態皆空白的列視為純備註列（如颱風停班說明），不強制檢查。
+    時段可為「全天」或任意「HH:MM~HH:MM」時間範圍（不限於分析時段清單）。"""
     errors = []
     for i, (period, status) in enumerate(zip(log_df['時段'], log_df['狀態']), start=1):
         period = (period or '').strip()
@@ -171,23 +213,45 @@ def _validate_log_periods(log_df: pd.DataFrame, all_periods: list[str]) -> list[
             continue
         if not period:
             errors.append(f'第 {i} 列：已填寫狀態但時段未填寫')
-        elif period not in valid:
-            errors.append(f'第 {i} 列：「{period}」不是有效時段（需為「全天」或：{"、".join(all_periods)}）')
+        elif period != '全天' and _parse_period(period) is None:
+            errors.append(f'第 {i} 列：「{period}」不是有效時段（需為「全天」或 HH:MM~HH:MM 格式，且起始時間需早於結束時間）')
     return errors
 
 
+def _normalize_log_date(date_str: str) -> str:
+    """將操作紀錄中的日期字串標準化為 YYYY/MM/DD（補零），以便與日期分配表的鍵值比對。
+    無法解析時原樣回傳。"""
+    try:
+        return pd.Timestamp(str(date_str).strip()).strftime('%Y/%m/%d')
+    except (ValueError, TypeError):
+        return str(date_str).strip()
+
+
 def _period_status_map(log_df: pd.DataFrame, periods: list[str]) -> dict[tuple[str, str], str]:
-    """由 AI 操作紀錄建立 {(日期, 時段): 狀態} 對照表（僅限 periods 內的時段）。
-    「全天」列先展開套用到 periods 內所有時段，同日期同時段的個別列再覆蓋（較明確者優先）。"""
+    """由 AI 操作紀錄建立 {(日期, 時段): 狀態} 對照表（僅限 periods 內的分析時段）。
+    「全天」列先展開套用到 periods 內所有時段（最低優先權）；
+    其餘列若其時間範圍完整涵蓋某分析時段，則覆蓋該時段狀態（較明確者優先）。"""
+    period_ranges = {p: _parse_period(p) for p in periods}
     status: dict[tuple[str, str], str] = {}
     records = log_df.to_dict('records')
     for r in records:
         if r.get('時段') == '全天' and r.get('狀態') in ('啟動', '關閉'):
+            d = _normalize_log_date(r['日期'])
             for p in periods:
-                status[(r['日期'], p)] = r['狀態']
+                status[(d, p)] = r['狀態']
     for r in records:
-        if r.get('時段') in periods and r.get('狀態') in ('啟動', '關閉'):
-            status[(r['日期'], r['時段'])] = r['狀態']
+        r_period = (r.get('時段') or '').strip()
+        if r_period == '全天' or r.get('狀態') not in ('啟動', '關閉'):
+            continue
+        r_range = _parse_period(r_period)
+        if r_range is None:
+            continue
+        r_start, r_end = r_range
+        d = _normalize_log_date(r['日期'])
+        for p in periods:
+            p_range = period_ranges[p]
+            if p_range is not None and r_start <= p_range[0] and p_range[1] <= r_end:
+                status[(d, p)] = r['狀態']
     return status
 
 
@@ -212,8 +276,9 @@ if st.session_state.get('_current_site') != selected_site:
     st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
 # 載入當前場域資料
-CSV_PATH = BASE_DIR / SITE_OPTIONS[selected_site]
-LOG_PATH = BASE_DIR / LOG_PATHS[selected_site]
+CSV_PATH = DATA_DIR / SITE_OPTIONS[selected_site]
+LOG_PATH = DATA_DIR / LOG_PATHS[selected_site]
+SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
 
 if not CSV_PATH.exists():
     st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
@@ -350,8 +415,11 @@ with st.sidebar:
         '預設依 AI 操作紀錄判斷：無紀錄視為開啟定時時制（事前）。'
     )
 
-    if st.button('↺ 重置為 AI 操作紀錄預設值', use_container_width=True):
-        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
+    if st.button('↺ 重設', use_container_width=True):
+        cleared_df = st.session_state['date_df'].copy()
+        cleared_df['事前'] = False
+        cleared_df['事後'] = False
+        st.session_state['date_df'] = cleared_df
         st.session_state['editor_ver'] += 1
         st.rerun()
 
@@ -379,17 +447,85 @@ with st.sidebar:
 
     if selected_periods:
         counts_str = '　'.join(
-            f"{p}：事前{len(before_by_period[p])}／事後{len(after_by_period[p])}"
+            f"{_esc_md(p)}：事前{len(before_by_period[p])}／事後{len(after_by_period[p])}"
             for p in selected_periods
         )
         st.caption(f'已選：{counts_str}')
 
     st.divider()
 
+    # ── 儲存 / 載入日期分配 ─────────────────────────────────────────────────
+    st.subheader('💾 儲存 / 載入日期分配')
+    saved_selections = _load_selections(SELECTION_PATH)
+
+    save_name = st.text_input('分配名稱', key='save_selection_name', placeholder='例如：早尖峰_2026Q1')
+    if st.button('💾 儲存目前日期分配', use_container_width=True):
+        name = save_name.strip()
+        if not name:
+            st.warning('請先輸入分配名稱')
+        else:
+            new_preset = {
+                'name':     name,
+                'saved_at': datetime.now().strftime('%Y/%m/%d %H:%M'),
+                'day_type': day_type,
+                'periods':  selected_periods,
+                'rows': [
+                    {
+                        '日期': r['日期'],
+                        '星':   r['星'],
+                        '時段': r['時段'],
+                        '事前': bool(r['事前']),
+                        '事後': bool(r['事後']),
+                    }
+                    for r in edited_df.to_dict('records')
+                ],
+            }
+            saved_selections = [s for s in saved_selections if s['name'] != name] + [new_preset]
+            _save_selections(SELECTION_PATH, saved_selections)
+            st.success(f'已儲存「{name}」')
+
+    def _apply_load_preset():
+        """按鈕的 on_click 回呼：必須在此處（而非按鈕觸發後的一般程式流程）寫入
+        widget 對應的 session_state 鍵值，否則會因該 widget 已於本次執行中
+        建立而噴出 StreamlitAPIException。"""
+        presets = _load_selections(SELECTION_PATH)
+        preset = next((s for s in presets if s['name'] == st.session_state['load_selection_name']), None)
+        if preset is None:
+            return
+        valid_periods = [p for p in preset['periods'] if p in all_periods]
+
+        base_df = _make_date_period_df(valid_periods, _load_log())
+        saved_map = {
+            (r['日期'], r['時段']): (r['事前'], r['事後'])
+            for r in preset['rows']
+        }
+        for idx, row in base_df.iterrows():
+            key = (row['日期'], row['時段'])
+            if key in saved_map:
+                before_v, after_v = saved_map[key]
+                base_df.at[idx, '事前'] = before_v
+                base_df.at[idx, '事後'] = after_v
+
+        st.session_state['day_type_radio'] = preset['day_type']
+        periods_widget_key = f"periods_{selected_site}_{preset['day_type']}"
+        st.session_state[periods_widget_key] = valid_periods
+        st.session_state['_periods_key'] = (selected_site, tuple(sorted(valid_periods)))
+        st.session_state['date_df'] = base_df
+        st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
+
+    if saved_selections:
+        preset_names = [s['name'] for s in saved_selections]
+        st.selectbox('選擇已儲存的分配', preset_names, key='load_selection_name')
+        st.button('📂 載入所選分配', use_container_width=True, on_click=_apply_load_preset)
+    else:
+        st.caption('尚無已儲存的日期分配')
+
+    st.divider()
+
     # 選項
     st.subheader('⚙️ 選項')
     include_tt  = st.checkbox('包含旅行時間', value=True)
-    show_detail = st.checkbox('顯示各路口各方向明細', value=False)
+    show_detail = st.checkbox('顯示各路口各方向明細', value=True)
 
     st.divider()
 
@@ -417,7 +553,7 @@ with st.sidebar:
         st.caption('⚠️ 請先選擇時段，且至少一個時段同時有事前與事後日期')
     elif len(usable_periods) < len(selected_periods):
         missing = [p for p in selected_periods if p not in usable_periods]
-        st.caption(f'⚠️ 以下時段缺少事前或事後日期，分析結果將留白：{"、".join(missing)}')
+        st.caption(f'⚠️ 以下時段缺少事前或事後日期，分析結果將留白：{"、".join(_esc_md(p) for p in missing)}')
 
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
 st.title('🚦 AI 號誌事前後分析系統')
@@ -426,9 +562,10 @@ st.subheader(f'場域：{selected_site}')
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
 with st.expander('📋 AI 操作紀錄', expanded=False):
     st.caption(
-        f'紀錄檔：`{LOG_PATH.name}`（與程式同目錄，可用 Excel 直接開啟修改）  \n'
+        f'紀錄檔：`{LOG_PATH.name}`（位於 data 資料夾，可用 Excel 直接開啟修改）  \n'
         '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
-        f'**時段**欄請填「全天」或以下其中之一：{"、".join(all_periods)}'
+        '**時段**欄請填「全天」或任意「HH:MM~HH:MM」時間範圍（不限於分析時段清單，'
+        '系統會自動判斷分析時段是否完整落在此範圍內）'
     )
     log_df_ui = _load_log()
     edited_log = st.data_editor(
@@ -451,7 +588,7 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
         key='log_editor',
     )
     if st.button('💾 儲存操作紀錄', key='save_log'):
-        errors = _validate_log_periods(edited_log, all_periods)
+        errors = _validate_log_periods(edited_log)
         if errors:
             st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
         else:
@@ -485,6 +622,14 @@ summary_rows = [
     for p in periods
 ]
 st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+# ── 全時段合計概覽 ────────────────────────────────────────────────────────────
+st.subheader('📊 系統層級改善率概覽')
+st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
+overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt)
+_display_overview_table(overview_all, inc_tt)
+
+st.divider()
 
 # ── 概覽表 ────────────────────────────────────────────────────────────────────
 st.subheader('📊 各時段系統層級改善率概覽')

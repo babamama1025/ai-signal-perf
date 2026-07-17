@@ -24,7 +24,10 @@
 ├── comparison_logic.py             # 統計計算與分析文字產生
 ├── chart_builder.py                # Plotly 圖表工廠
 ├── export_builder.py               # openpyxl Excel 匯出
-├── performance_summary.csv         # 績效原始資料（UTF-8）
+├── data/                           # 各場域外部資料（CSV / JSON）
+│   ├── perf_summary_4.csv          # 績效原始資料（UTF-8）
+│   ├── ai_operation_log_4.csv      # AI 操作紀錄
+│   └── date_selections_4.json      # 已儲存的事前/事後日期分配
 ├── =*績效*.xlsx                    # 測試日分類來源（選用）
 └── run.bat                         # Windows 一鍵啟動腳本
 ```

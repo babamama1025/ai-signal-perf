@@ -20,7 +20,7 @@ FONT_GREEN = Font(name='微軟正黑體', color='375623')
 FONT_RED = Font(name='微軟正黑體', color='9C0006')
 FONT_NORMAL = Font(name='微軟正黑體')
 
-from comparison_logic import LOWER_BETTER, METRIC_UNITS
+from comparison_logic import LOWER_BETTER, METRIC_UNITS, aggregate_periods
 
 
 def build_comparison_xlsx(
@@ -98,110 +98,152 @@ def _build_summary_sheet(wb, all_results, before_by_period, after_by_period):
     ws = wb.create_sheet('總表')
     periods = list(all_results.keys())
 
+    # 「全時段合計」：總停等延滯／通過量加總、平均停等延滯由加總重新推導（不含旅行時間）
+    aggregated = aggregate_periods(all_results, periods, include_travel_time=False)
+    n_before_all = sum(len(before_by_period.get(p, [])) for p in periods)
+    n_after_all  = sum(len(after_by_period.get(p, [])) for p in periods)
+
+    col_blocks = [('全時段合計', aggregated, n_before_all, n_after_all)]
+    col_blocks += [
+        (period, all_results[period], len(before_by_period.get(period, [])), len(after_by_period.get(period, [])))
+        for period in periods
+    ]
+
     # 標題列
+    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=1)
     ws.cell(1, 1, '指標').font = FONT_BOLD
     ws.cell(1, 1).fill = FILL_SUMMARY_HDR
-    ws.cell(2, 1, '欄位').font = FONT_BOLD
-    ws.cell(2, 1).fill = FILL_SUMMARY_HDR
+    ws.cell(1, 1).alignment = Alignment(horizontal='center', vertical='center')
 
     col_start = 2
-    for p, period in enumerate(periods):
-        c = col_start + p * 2
-        n_before = len(before_by_period.get(period, []))
-        n_after  = len(after_by_period.get(period, []))
-        ws.merge_cells(start_row=1, start_column=c, end_row=1, end_column=c + 1)
-        ws.cell(1, c, f'{period}（前{n_before}/後{n_after}）').font = FONT_BOLD
+    sub_headers = ['事前平均', '事後平均', '差異', '改善%']
+    for i, (label, _, n_before, n_after) in enumerate(col_blocks):
+        c = col_start + i * 4
+        ws.merge_cells(start_row=1, start_column=c, end_row=1, end_column=c + 3)
+        ws.cell(1, c, f'{label}（前{n_before}/後{n_after}）').font = FONT_BOLD
         ws.cell(1, c).fill = FILL_SUMMARY_HDR
         ws.cell(1, c).alignment = Alignment(horizontal='center')
-        ws.cell(2, c, '事前平均').font = FONT_BOLD
-        ws.cell(2, c).fill = FILL_SUMMARY_HDR
-        ws.cell(2, c + 1, '事後平均').font = FONT_BOLD
-        ws.cell(2, c + 1).fill = FILL_SUMMARY_HDR
+        for j, h in enumerate(sub_headers):
+            ws.cell(2, c + j, h).font = FONT_BOLD
+            ws.cell(2, c + j).fill = FILL_SUMMARY_HDR
 
     row = 3
-    # 取第一個時段的第一個指標結果，從中讀取系統欄名稱（不硬編碼）
     first_period = periods[0]
-    first_metric_df = next(
-        (v for v in all_results[first_period].values()
-         if isinstance(v, pd.DataFrame) and not v.empty and '欄位' in v.columns),
-        pd.DataFrame(),
-    )
-    # 系統總量欄：取第一個時段第一個指標的前幾筆（通常是系統層級聚合欄）
-    # 實際上系統欄由 data_loader.get_system_columns() 決定，此處從結果欄位清單取得
+    # 系統總量欄：由 data_loader.get_system_columns() 決定（不硬編碼）
     import data_loader as _dl
     sys_col_names = _dl.get_system_columns()
-    # 轉成顯示名稱（compare_comparison 已套用 display_name，但系統欄名稱通常不需轉換）
     sys_display = [_dl.get_display_name(c) for c in sys_col_names]
 
     metrics_in_results = [k for k in all_results[first_period] if k != '旅行時間']
     for metric in metrics_in_results:
-        ws.cell(row, 1, f'▶ {metric}').font = FONT_WHITE_BOLD
+        ws.cell(row, 1, metric).font = FONT_WHITE_BOLD
         ws.cell(row, 1).fill = FILL_HEADER
-        ws.merge_cells(start_row=row, start_column=1,
-                       end_row=row, end_column=1 + len(periods) * 2)
+        for i, (_, results_dict, _n_before, _n_after) in enumerate(col_blocks):
+            c = col_start + i * 4
+            df = results_dict.get(metric, pd.DataFrame())
+            r = df[df['欄位'].isin(sys_display)] if not df.empty else pd.DataFrame()
+            if not r.empty:
+                b, a = r['事前平均'].values[0], r['事後平均'].values[0]
+                diff, pct = r['差異'].values[0], r['改善%'].values[0]
+                ws.cell(row, c, b if not pd.isna(b) else None)
+                ws.cell(row, c + 1, a if not pd.isna(a) else None)
+                ws.cell(row, c + 2, diff if not pd.isna(diff) else None)
+                _apply_num_format(ws.cell(row, c), metric)
+                _apply_num_format(ws.cell(row, c + 1), metric)
+                _apply_num_format(ws.cell(row, c + 2), metric)
+                _write_pct(ws.cell(row, c + 3), pct)
         row += 1
-        for field in sys_display:
-            ws.cell(row, 1, field).font = FONT_NORMAL
-            for p, period in enumerate(periods):
-                c = col_start + p * 2
-                df = all_results[period].get(metric, pd.DataFrame())
-                r = df[df['欄位'] == field] if not df.empty else pd.DataFrame()
-                if not r.empty:
-                    b, a = r['事前平均'].values[0], r['事後平均'].values[0]
-                    ws.cell(row, c, b if not pd.isna(b) else None)
-                    ws.cell(row, c + 1, a if not pd.isna(a) else None)
-                    _apply_num_format(ws.cell(row, c), metric)
-                    _apply_num_format(ws.cell(row, c + 1), metric)
-            row += 1
 
     # 欄寬
     ws.column_dimensions['A'].width = 18
-    for col in range(2, 2 + len(periods) * 2):
-        ws.column_dimensions[get_column_letter(col)].width = 14
+    for col in range(2, 2 + len(col_blocks) * 4):
+        ws.column_dimensions[get_column_letter(col)].width = 13
 
     # 說明（各時段事前／事後天數已列於欄標題）
-    ws.cell(row + 1, 1, '各時段事前／事後天數詳見欄標題；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
+    ws.cell(row + 1, 1, '「全時段合計」為所有時段加總（旅行時間類指標除外）；各時段事前／事後天數詳見欄標題；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
 
 
 def _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time):
     safe_name = period.replace(':', '').replace('~', '-')[:31]
     ws = wb.create_sheet(safe_name)
 
+    # 依指標順序並排顯示（排除旅行時間；旅行時間接在最後一個路口來向列之後）
+    metrics_in_results = [k for k in results if k != '旅行時間']
+    n_metrics = len(metrics_in_results)
+    total_cols = max(1 + n_metrics * 4, 5)
+
     # 第一列：時段標題
-    ws.merge_cells('A1:E1')
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     ws.cell(1, 1, f"{period}  │  事前：{len(before_dates)} 日  │  事後：{len(after_dates)} 日")
     ws.cell(1, 1).font = Font(name='微軟正黑體', bold=True, size=12)
     ws.cell(1, 1).alignment = Alignment(horizontal='center')
 
-    # 第二列：欄位標頭
-    headers = ['項目', '事前平均', '事後平均', '差異', '改善%']
-    for c, h in enumerate(headers, 1):
-        cell = ws.cell(2, c, h)
-        cell.font = FONT_WHITE_BOLD
-        cell.fill = FILL_HEADER
-        cell.alignment = Alignment(horizontal='center')
+    # 第二、三列：欄位標頭（各指標並排：事前平均／事後平均／差異／改善%）
+    ws.merge_cells(start_row=2, start_column=1, end_row=3, end_column=1)
+    item_cell = ws.cell(2, 1, '項目')
+    item_cell.font = FONT_WHITE_BOLD
+    item_cell.fill = FILL_HEADER
+    item_cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    row = 3
-    # 依指標順序寫入（排除旅行時間；旅行時間接在擁有旅行時間資料的指標後面）
-    tt_df = results.get('旅行時間', pd.DataFrame())
-    tt_written = False
-    metrics_in_results = [k for k in results if k != '旅行時間']
+    sub_headers = ['事前平均', '事後平均', '差異', '改善%']
+    for m, metric in enumerate(metrics_in_results):
+        c = 2 + m * 4
+        unit = METRIC_UNITS.get(metric, '')
+        ws.merge_cells(start_row=2, start_column=c, end_row=2, end_column=c + 3)
+        head_cell = ws.cell(2, c, f'{metric} ({unit})')
+        head_cell.font = FONT_WHITE_BOLD
+        head_cell.fill = FILL_HEADER
+        head_cell.alignment = Alignment(horizontal='center')
+        for i, h in enumerate(sub_headers):
+            sub_cell = ws.cell(3, c + i, h)
+            sub_cell.font = FONT_WHITE_BOLD
+            sub_cell.fill = FILL_HEADER
+            sub_cell.alignment = Alignment(horizontal='center')
+
+    # 資料列：欄位順序取各指標資料的聯集（依出現順序）
+    field_order = []
+    seen = set()
     for metric in metrics_in_results:
         mdf = results.get(metric, pd.DataFrame())
-        unit = METRIC_UNITS.get(metric, '')
-        row = _write_section(ws, row, f'▶ {metric} ({unit})', mdf, metric, FILL_HEADER)
-        # 旅行時間接在第一個有旅行時間資料的量測指標之後
-        if include_travel_time and not tt_written and not tt_df.empty:
-            row = _write_section(ws, row, '   ▶▶ 旅行時間 (秒)', tt_df, '旅行時間', FILL_SUBHEADER)
-            tt_written = True
+        if mdf.empty:
+            continue
+        for f in mdf['欄位']:
+            if f not in seen:
+                seen.add(f)
+                field_order.append(f)
+
+    row = 4
+    for field in field_order:
+        ws.cell(row, 1, field).font = FONT_NORMAL
+        for m, metric in enumerate(metrics_in_results):
+            c = 2 + m * 4
+            mdf = results.get(metric, pd.DataFrame())
+            r = mdf[mdf['欄位'] == field] if not mdf.empty else pd.DataFrame()
+            if not r.empty:
+                b, a, diff, pct = (r[col].values[0] for col in ['事前平均', '事後平均', '差異', '改善%'])
+                _write_num(ws.cell(row, c), b, metric)
+                _write_num(ws.cell(row, c + 1), a, metric)
+                _write_num(ws.cell(row, c + 2), diff, metric)
+                _write_pct(ws.cell(row, c + 3), pct)
+            for cc in range(c, c + 4):
+                ws.cell(row, cc).alignment = Alignment(horizontal='right')
+        row += 1
+
+    # 旅行時間：接續在最後一個路口來向列之後
+    tt_df = results.get('旅行時間', pd.DataFrame())
+    if include_travel_time and not tt_df.empty:
+        row = _write_section(
+            ws, row, f'▶ 旅行時間 ({METRIC_UNITS.get("旅行時間", "")})',
+            tt_df, '旅行時間', FILL_HEADER, total_cols,
+        )
 
     # 欄寬
     ws.column_dimensions['A'].width = 30
-    for col_letter in ['B', 'C', 'D', 'E']:
-        ws.column_dimensions[col_letter].width = 14
+    for col in range(2, total_cols + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
 
-    # 凍結前兩列
-    ws.freeze_panes = 'A3'
+    # 凍結前三列
+    ws.freeze_panes = 'A4'
 
 
 def _build_raw_data_sheet(wb, df: pd.DataFrame, before_by_period, after_by_period, periods):
@@ -247,8 +289,8 @@ def _build_raw_data_sheet(wb, df: pd.DataFrame, before_by_period, after_by_perio
     ws.freeze_panes = 'A2'
 
 
-def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fill) -> int:
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fill, total_cols: int = 5) -> int:
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
     cell = ws.cell(row, 1, header)
     if fill == FILL_HEADER:
         cell.font = FONT_WHITE_BOLD
@@ -273,24 +315,27 @@ def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fil
         _write_num(ws.cell(row, 3), a, metric)
         _write_num(ws.cell(row, 4), diff, metric)
 
-        pct_cell = ws.cell(row, 5)
-        if not pd.isna(pct):
-            pct_cell.value = pct
-            pct_cell.number_format = '+0.0%;-0.0%;0.0%'
-            if pct > 0:
-                pct_cell.fill = FILL_GREEN
-                pct_cell.font = FONT_GREEN
-            elif pct < 0:
-                pct_cell.fill = FILL_RED
-                pct_cell.font = FONT_RED
-        else:
-            pct_cell.value = '—'
+        _write_pct(ws.cell(row, 5), pct)
 
         for c in range(2, 6):
             ws.cell(row, c).alignment = Alignment(horizontal='right')
         row += 1
 
     return row
+
+
+def _write_pct(cell, pct):
+    if not pd.isna(pct):
+        cell.value = pct
+        cell.number_format = '+0.0%;-0.0%;0.0%'
+        if pct > 0:
+            cell.fill = FILL_GREEN
+            cell.font = FONT_GREEN
+        elif pct < 0:
+            cell.fill = FILL_RED
+            cell.font = FONT_RED
+    else:
+        cell.value = '—'
 
 
 def _write_num(cell, val, metric: str):

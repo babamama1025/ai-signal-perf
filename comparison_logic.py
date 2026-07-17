@@ -151,6 +151,86 @@ def _improvement_pct(before: float, after: float, metric: str) -> float:
     return (before - after) / before if metric in LOWER_BETTER else (after - before) / before
 
 
+def aggregate_periods(
+    all_results: dict[str, dict[str, pd.DataFrame]],
+    periods: list[str],
+    include_travel_time: bool = True,
+) -> dict[str, pd.DataFrame]:
+    """把多個時段的系統層級比較結果整合成單一「全時段合計」比較表。
+
+    - 總停等延滯、通過量：各時段系統層級數值加總後，重新計算差異／改善%
+    - 平均停等延滯：由加總後的總停等延滯 / 通過量 計算（避免「平均的平均」）
+    - 旅行時間：各路徑／路段的事前、事後平均值取各時段平均
+    """
+    def _sum_system(metric: str) -> tuple[float, float]:
+        b_sum = a_sum = 0.0
+        found = False
+        for period in periods:
+            mdf = all_results.get(period, {}).get(metric, pd.DataFrame())
+            if mdf.empty:
+                continue
+            row = mdf[mdf['欄位'] == '系統']
+            if row.empty:
+                continue
+            b, a = row['事前平均'].values[0], row['事後平均'].values[0]
+            if pd.isna(b) or pd.isna(a):
+                continue
+            b_sum += b
+            a_sum += a
+            found = True
+        return (b_sum, a_sum) if found else (float('nan'), float('nan'))
+
+    result: dict[str, pd.DataFrame] = {}
+
+    b_delay, a_delay = _sum_system('總停等延滯')
+    b_vol,   a_vol   = _sum_system('通過量')
+
+    for metric, b, a in (('總停等延滯', b_delay, a_delay), ('通過量', b_vol, a_vol)):
+        diff = a - b if not (pd.isna(a) or pd.isna(b)) else float('nan')
+        result[metric] = pd.DataFrame(
+            [['系統', b, a, diff, _improvement_pct(b, a, metric)]],
+            columns=['欄位', '事前平均', '事後平均', '差異', '改善%'],
+        )
+
+    b_avg = b_delay / b_vol if _valid_ratio(b_delay, b_vol) else float('nan')
+    a_avg = a_delay / a_vol if _valid_ratio(a_delay, a_vol) else float('nan')
+    diff_avg = a_avg - b_avg if not (pd.isna(a_avg) or pd.isna(b_avg)) else float('nan')
+    result['平均停等延滯'] = pd.DataFrame(
+        [['系統', b_avg, a_avg, diff_avg, _improvement_pct(b_avg, a_avg, '平均停等延滯')]],
+        columns=['欄位', '事前平均', '事後平均', '差異', '改善%'],
+    )
+
+    if include_travel_time:
+        tt_before: dict[str, list[float]] = {}
+        tt_after:  dict[str, list[float]] = {}
+        tt_order:  list[str] = []
+        for period in periods:
+            tdf = all_results.get(period, {}).get('旅行時間', pd.DataFrame())
+            if tdf.empty:
+                continue
+            for _, r in tdf.iterrows():
+                col = r['欄位']
+                if col not in tt_order:
+                    tt_order.append(col)
+                if not pd.isna(r['事前平均']):
+                    tt_before.setdefault(col, []).append(r['事前平均'])
+                if not pd.isna(r['事後平均']):
+                    tt_after.setdefault(col, []).append(r['事後平均'])
+
+        rows = []
+        for col in tt_order:
+            b_list, a_list = tt_before.get(col, []), tt_after.get(col, [])
+            b = sum(b_list) / len(b_list) if b_list else float('nan')
+            a = sum(a_list) / len(a_list) if a_list else float('nan')
+            if pd.isna(b) and pd.isna(a):
+                continue
+            diff = a - b if not (pd.isna(a) or pd.isna(b)) else float('nan')
+            rows.append([col, b, a, diff, _improvement_pct(b, a, '旅行時間')])
+        result['旅行時間'] = pd.DataFrame(rows, columns=['欄位', '事前平均', '事後平均', '差異', '改善%'])
+
+    return result
+
+
 # ── 分析文字與樣式 ─────────────────────────────────────────────────────────
 
 def generate_analysis_text(
