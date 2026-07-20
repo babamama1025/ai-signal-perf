@@ -192,13 +192,16 @@ def _load_selections(path: Path) -> list[dict]:
 
 
 def _github_push_file(rel_path: str, content_bytes: bytes, commit_msg: str) -> bool:
-    """透過 GitHub Contents API 更新檔案；未設定 secrets 或失敗時靜默回傳 False。"""
+    """透過 GitHub Contents API 更新檔案；未設定 secrets 或失敗時靜默回傳 False。
+    失敗時會將原因存入 st.session_state['_github_push_error']。"""
+    st.session_state.pop('_github_push_error', None)
     try:
         cfg    = st.secrets.get('github', {})
         token  = cfg.get('token', '')
         repo   = cfg.get('repo', '')
         branch = cfg.get('branch', 'main')
         if not token or not repo:
+            st.session_state['_github_push_error'] = 'not_configured'
             return False
         headers = {
             'Authorization': f'token {token}',
@@ -215,9 +218,24 @@ def _github_push_file(rel_path: str, content_bytes: bytes, commit_msg: str) -> b
         if sha:
             payload['sha'] = sha
         r2 = requests.put(api_url, json=payload, headers=headers, timeout=15)
+        if not r2.ok:
+            st.session_state['_github_push_error'] = f'HTTP {r2.status_code}'
         return r2.ok
-    except Exception:
+    except Exception as e:
+        st.session_state['_github_push_error'] = type(e).__name__
         return False
+
+
+def _github_sync_suffix() -> str:
+    """根據 _github_push_error 產生對應的失敗說明文字。"""
+    err = st.session_state.pop('_github_push_error', None)
+    if err is None:
+        return ''
+    if err == 'not_configured':
+        return '（GitHub 未設定，重啟後將消失）'
+    if err.startswith('HTTP'):
+        return f'（GitHub 同步失敗：{err}，請檢查 Token 是否有效）'
+    return f'（GitHub 連線失敗：{err}，重啟後將消失）'
 
 
 def _save_selections(path: Path, selections: list[dict]) -> bool:
@@ -562,7 +580,7 @@ with st.sidebar:
             }
             saved_selections = [s for s in saved_selections if s['name'] != name] + [new_preset]
             synced = _save_selections(SELECTION_PATH, saved_selections)
-            suffix = '，已同步至 GitHub ✓' if synced else '（GitHub 未設定，重啟後將消失）'
+            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
             st.session_state['_save_load_msg'] = f'✅ 已儲存「{name}」{suffix}'
             st.rerun()
 
@@ -665,7 +683,7 @@ with st.sidebar:
             merged = list(existing_map.values())
             synced = _save_selections(SELECTION_PATH, merged)
             added  = len(merged) - len(saved_selections)
-            suffix = '，已同步至 GitHub ✓' if synced else ''
+            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
             st.session_state['_edit_msg'] = f'✅ 匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）{suffix}'
             st.rerun()
         except Exception as e:
@@ -744,7 +762,7 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
             st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
         else:
             synced = _save_log(edited_log)
-            suffix = '，已同步至 GitHub ✓' if synced else '（GitHub 未設定，重啟後將消失）'
+            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
             st.session_state['_log_msg'] = f'✅ 已儲存 {LOG_PATH.name}{suffix}'
             st.rerun()
 
