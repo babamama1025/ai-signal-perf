@@ -327,6 +327,9 @@ with st.sidebar:
         f'資料範圍：{all_dates[0].strftime("%Y/%m/%d")} ～ '
         f'{all_dates[-1].strftime("%Y/%m/%d")}（共 {len(all_dates)} 天）'
     )
+    st.caption(
+        f'資料更新：{datetime.fromtimestamp(CSV_PATH.stat().st_mtime).strftime("%Y/%m/%d")}'
+    )
     st.divider()
 
     # ── 日期類型（平日 / 假日）────────────────────────────────────────────
@@ -349,11 +352,14 @@ with st.sidebar:
     site_def_pds = site_def.get(default_key, ['07:00~09:00', '14:00~16:00', '16:00~19:00'])
     default_periods = [p for p in site_def_pds if p in all_periods]
 
+    periods_widget_key = f'periods_{selected_site}_{day_type}'
+    if periods_widget_key not in st.session_state:
+        st.session_state[periods_widget_key] = default_periods
+
     selected_periods = st.multiselect(
         '選擇時段（可多選）',
         options=all_periods,
-        default=default_periods,
-        key=f'periods_{selected_site}_{day_type}',   # 切換場域或日期類型時自動重置
+        key=periods_widget_key,   # 切換場域或日期類型時自動重置
     )
 
     # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
