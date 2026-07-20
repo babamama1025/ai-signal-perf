@@ -1,6 +1,8 @@
 """AI 號誌事前後分析系統 (Streamlit 應用程式)"""
 import re
 import json
+import base64
+import requests
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -170,8 +172,14 @@ def _load_log() -> pd.DataFrame:
     return pd.DataFrame(columns=LOG_COLS)
 
 
-def _save_log(log_df: pd.DataFrame):
+def _save_log(log_df: pd.DataFrame) -> bool:
+    """儲存至本機並同步 GitHub，回傳 GitHub 同步是否成功。"""
     log_df.to_csv(LOG_PATH, index=False, encoding='utf-8-sig')
+    return _github_push_file(
+        LOG_PATH.relative_to(BASE_DIR).as_posix(),
+        LOG_PATH.read_bytes(),
+        f'auto: update {LOG_PATH.name}',
+    )
 
 
 def _load_selections(path: Path) -> list[dict]:
@@ -183,8 +191,69 @@ def _load_selections(path: Path) -> list[dict]:
     return []
 
 
-def _save_selections(path: Path, selections: list[dict]):
-    path.write_text(json.dumps(selections, ensure_ascii=False, indent=2), encoding='utf-8-sig')
+def _github_push_file(rel_path: str, content_bytes: bytes, commit_msg: str) -> bool:
+    """透過 GitHub Contents API 更新檔案；未設定 secrets 或失敗時靜默回傳 False。"""
+    try:
+        cfg    = st.secrets.get('github', {})
+        token  = cfg.get('token', '')
+        repo   = cfg.get('repo', '')
+        branch = cfg.get('branch', 'main')
+        if not token or not repo:
+            return False
+        headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
+        api_url = f'https://api.github.com/repos/{repo}/contents/{rel_path}'
+        r = requests.get(api_url, headers=headers, params={'ref': branch}, timeout=10)
+        sha = r.json().get('sha') if r.ok else None
+        payload: dict = {
+            'message': commit_msg,
+            'content': base64.b64encode(content_bytes).decode(),
+            'branch':  branch,
+        }
+        if sha:
+            payload['sha'] = sha
+        r2 = requests.put(api_url, json=payload, headers=headers, timeout=15)
+        return r2.ok
+    except Exception:
+        return False
+
+
+def _save_selections(path: Path, selections: list[dict]) -> bool:
+    """儲存至本機並同步 GitHub，回傳 GitHub 同步是否成功。"""
+    content_bytes = json.dumps(selections, ensure_ascii=False, indent=2).encode('utf-8-sig')
+    path.write_bytes(content_bytes)
+    return _github_push_file(
+        path.relative_to(BASE_DIR).as_posix(),
+        content_bytes,
+        f'auto: update {path.name}',
+    )
+
+
+@st.dialog('重新命名日期分配')
+def _rename_dialog(cur_name: str, selections: list):
+    st.write(f'將「{cur_name}」修改為：')
+    new_name = st.text_input('新名稱', placeholder='輸入新名稱', label_visibility='collapsed')
+    col_ok, col_cancel = st.columns(2)
+    if col_ok.button('確認', use_container_width=True, type='primary'):
+        new_name = new_name.strip()
+        if not new_name:
+            st.warning('請輸入新名稱')
+        elif new_name == cur_name:
+            st.warning('新名稱與現有名稱相同')
+        elif any(s['name'] == new_name for s in selections):
+            st.warning('此名稱已存在，請使用其他名稱')
+        else:
+            updated = [
+                {**s, 'name': new_name} if s['name'] == cur_name else s
+                for s in selections
+            ]
+            _save_selections(SELECTION_PATH, updated)
+            st.session_state['_edit_msg'] = f'✅ 已將「{cur_name}」重新命名為「{new_name}」'
+            st.rerun()
+    if col_cancel.button('取消', use_container_width=True):
+        st.rerun()
 
 
 def _parse_period(period: str) -> tuple[int, int] | None:
@@ -307,12 +376,12 @@ def _make_date_period_df(periods: list[str], log_df: pd.DataFrame) -> pd.DataFra
             status = status_map.get((d_str, p), '關閉')
             rows.append({
                 '日期': d_str,
-                '星':   dl.TW_WEEKDAY[d.weekday()],
+                '星期': dl.TW_WEEKDAY[d.weekday()],
                 '時段': p,
                 '事前': status == '關閉',
                 '事後': status == '啟動',
             })
-    return pd.DataFrame(rows, columns=['日期', '星', '時段', '事前', '事後'])
+    return pd.DataFrame(rows, columns=['日期', '星期', '時段', '事前', '事後'])
 
 
 # ── Session State 初始化 ────────────────────────────────────────────────────
@@ -439,8 +508,8 @@ with st.sidebar:
         key=f'date_editor_{st.session_state["editor_ver"]}',
         column_config={
             '日期': st.column_config.TextColumn('日期', disabled=True, width='small'),
-            '星':  st.column_config.TextColumn('星', disabled=True, width='small'),
-            '時段': st.column_config.TextColumn('時段', disabled=True, width='medium'),
+            '星期': st.column_config.TextColumn('星期', disabled=True, width='small'),
+            '時段': st.column_config.TextColumn('時段', disabled=True, width='small'),
             '事前': st.column_config.CheckboxColumn('事前', width='small'),
             '事後': st.column_config.CheckboxColumn('事後', width='small'),
         },
@@ -483,7 +552,7 @@ with st.sidebar:
                 'rows': [
                     {
                         '日期': r['日期'],
-                        '星':   r['星'],
+                        '星期': r['星期'],
                         '時段': r['時段'],
                         '事前': bool(r['事前']),
                         '事後': bool(r['事後']),
@@ -492,8 +561,10 @@ with st.sidebar:
                 ],
             }
             saved_selections = [s for s in saved_selections if s['name'] != name] + [new_preset]
-            _save_selections(SELECTION_PATH, saved_selections)
-            st.success(f'已儲存「{name}」')
+            synced = _save_selections(SELECTION_PATH, saved_selections)
+            suffix = '，已同步至 GitHub ✓' if synced else '（GitHub 未設定，重啟後將消失）'
+            st.session_state['_save_load_msg'] = f'✅ 已儲存「{name}」{suffix}'
+            st.rerun()
 
     def _apply_load_preset():
         """按鈕的 on_click 回呼：必須在此處（而非按鈕觸發後的一般程式流程）寫入
@@ -509,13 +580,16 @@ with st.sidebar:
         base_df = pd.DataFrame(
             [
                 {
-                    '日期': r['日期'], '星': r['星'], '時段': r['時段'],
-                    '事前': bool(r['事前']), '事後': bool(r['事後']),
+                    '日期': r['日期'],
+                    '星期': r.get('星期') or r.get('星', ''),  # 兼容舊存檔
+                    '時段': r['時段'],
+                    '事前': bool(r['事前']),
+                    '事後': bool(r['事後']),
                 }
                 for r in preset['rows']
                 if r['時段'] in valid_periods
             ],
-            columns=['日期', '星', '時段', '事前', '事後'],
+            columns=['日期', '星期', '時段', '事前', '事後'],
         )
 
         st.session_state['day_type_radio'] = preset['day_type']
@@ -523,6 +597,10 @@ with st.sidebar:
         st.session_state[periods_widget_key] = valid_periods
         st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)))
         st.session_state['date_df'] = base_df
+        st.session_state['_save_load_msg'] = (
+            f'✅ 已載入「{preset["name"]}」'
+            f'（{preset["day_type"]}，儲存於 {preset["saved_at"]}）'
+        )
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     if saved_selections:
@@ -532,8 +610,41 @@ with st.sidebar:
     else:
         st.caption('尚無已儲存的日期分配')
 
+    if msg := st.session_state.pop('_save_load_msg', None):
+        st.success(msg)
+
+    st.divider()
+
+    # ── 編輯日期分配 ─────────────────────────────────────────────────
+    st.subheader('✏️ 編輯日期分配')
+
+    if msg := st.session_state.pop('_edit_msg', None):
+        st.success(msg)
+
+    if saved_selections:
+        cur_name = st.session_state.get('load_selection_name', '')
+
+        if st.button(f'✏️ 重新命名「{cur_name}」', use_container_width=True):
+            _rename_dialog(cur_name, saved_selections)
+
+        if st.button(f'🗑️ 刪除「{cur_name}」', use_container_width=True):
+            st.session_state['_confirm_delete'] = cur_name
+
+        if st.session_state.get('_confirm_delete') == cur_name:
+            st.warning(f'確定要刪除「{cur_name}」嗎？刪除後無法恢復。')
+            col_yes, col_no = st.columns(2)
+            if col_yes.button('確認刪除', use_container_width=True, type='primary'):
+                remaining = [s for s in saved_selections if s['name'] != cur_name]
+                _save_selections(SELECTION_PATH, remaining)
+                st.session_state.pop('_confirm_delete', None)
+                st.session_state['_edit_msg'] = f'✅ 已刪除「{cur_name}」'
+                st.rerun()
+            if col_no.button('取消', use_container_width=True):
+                st.session_state.pop('_confirm_delete', None)
+                st.rerun()
+
     st.download_button(
-        '⬇️ 下載所有已儲存的分配（備份）',
+        '📤 匯出所有已儲存的日期分配',
         data=SELECTION_PATH.read_bytes() if SELECTION_PATH.exists() else b'[]',
         file_name=SELECTION_PATH.name,
         mime='application/json',
@@ -541,7 +652,7 @@ with st.sidebar:
     )
 
     uploaded_file = st.file_uploader(
-        '📥 匯入日期分配（合併備份檔）',
+        '📥 匯入日期分配',
         type='json',
         key='import_selections_file',
     )
@@ -552,9 +663,10 @@ with st.sidebar:
             for s in imported:
                 existing_map[s['name']] = s   # 同名者以匯入版本為準
             merged = list(existing_map.values())
-            _save_selections(SELECTION_PATH, merged)
-            added = len(merged) - len(saved_selections)
-            st.success(f'匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）')
+            synced = _save_selections(SELECTION_PATH, merged)
+            added  = len(merged) - len(saved_selections)
+            suffix = '，已同步至 GitHub ✓' if synced else ''
+            st.session_state['_edit_msg'] = f'✅ 匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）{suffix}'
             st.rerun()
         except Exception as e:
             st.error(f'匯入失敗：{e}')
@@ -631,8 +743,13 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
         if errors:
             st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
         else:
-            _save_log(edited_log)
-            st.success(f'已儲存 → {LOG_PATH}')
+            synced = _save_log(edited_log)
+            suffix = '，已同步至 GitHub ✓' if synced else '（GitHub 未設定，重啟後將消失）'
+            st.session_state['_log_msg'] = f'✅ 已儲存 {LOG_PATH.name}{suffix}'
+            st.rerun()
+
+    if msg := st.session_state.pop('_log_msg', None):
+        st.success(msg)
 
 if st.session_state['analysis_results'] is None:
     st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
