@@ -257,7 +257,7 @@ def _period_status_map(log_df: pd.DataFrame, periods: list[str]) -> dict[tuple[s
 
 # ── 資料載入（快取，依路徑分別快取）────────────────────────────────────────
 @st.cache_data(show_spinner='載入績效資料中…')
-def _load_df(csv_path: str):
+def _load_df(csv_path: str, _mtime: float):
     df = dl.load_performance_csv(Path(csv_path))
     return df, dict(dl.get_column_structure())
 
@@ -284,7 +284,7 @@ if not CSV_PATH.exists():
     st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
     st.stop()
 
-df, col_struct = _load_df(str(CSV_PATH))
+df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
 dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
 
 all_dates   = dl.get_available_dates(df)
@@ -353,7 +353,12 @@ with st.sidebar:
     default_periods = [p for p in site_def_pds if p in all_periods]
 
     periods_widget_key = f'periods_{selected_site}_{day_type}'
-    if periods_widget_key not in st.session_state:
+    _day_type_tracker  = f'_day_type_{selected_site}'
+    if st.session_state.get(_day_type_tracker) != day_type:
+        # 切換日期類型時強制重設為該類型的預設時段
+        st.session_state[_day_type_tracker]    = day_type
+        st.session_state[periods_widget_key]   = default_periods
+    elif periods_widget_key not in st.session_state:
         st.session_state[periods_widget_key] = default_periods
 
     selected_periods = st.multiselect(
@@ -363,7 +368,7 @@ with st.sidebar:
     )
 
     # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
-    periods_key = (selected_site, tuple(sorted(selected_periods)))
+    periods_key = (selected_site, day_type, tuple(sorted(selected_periods)))
     if st.session_state.get('_periods_key') != periods_key:
         st.session_state['_periods_key'] = periods_key
         st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
@@ -500,22 +505,23 @@ with st.sidebar:
             return
         valid_periods = [p for p in preset['periods'] if p in all_periods]
 
-        base_df = _make_date_period_df(valid_periods, _load_log())
-        saved_map = {
-            (r['日期'], r['時段']): (r['事前'], r['事後'])
-            for r in preset['rows']
-        }
-        for idx, row in base_df.iterrows():
-            key = (row['日期'], row['時段'])
-            if key in saved_map:
-                before_v, after_v = saved_map[key]
-                base_df.at[idx, '事前'] = before_v
-                base_df.at[idx, '事後'] = after_v
+        # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍
+        base_df = pd.DataFrame(
+            [
+                {
+                    '日期': r['日期'], '星': r['星'], '時段': r['時段'],
+                    '事前': bool(r['事前']), '事後': bool(r['事後']),
+                }
+                for r in preset['rows']
+                if r['時段'] in valid_periods
+            ],
+            columns=['日期', '星', '時段', '事前', '事後'],
+        )
 
         st.session_state['day_type_radio'] = preset['day_type']
         periods_widget_key = f"periods_{selected_site}_{preset['day_type']}"
         st.session_state[periods_widget_key] = valid_periods
-        st.session_state['_periods_key'] = (selected_site, tuple(sorted(valid_periods)))
+        st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)))
         st.session_state['date_df'] = base_df
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
@@ -525,6 +531,33 @@ with st.sidebar:
         st.button('📂 載入所選分配', use_container_width=True, on_click=_apply_load_preset)
     else:
         st.caption('尚無已儲存的日期分配')
+
+    st.download_button(
+        '⬇️ 下載所有已儲存的分配（備份）',
+        data=SELECTION_PATH.read_bytes() if SELECTION_PATH.exists() else b'[]',
+        file_name=SELECTION_PATH.name,
+        mime='application/json',
+        use_container_width=True,
+    )
+
+    uploaded_file = st.file_uploader(
+        '📥 匯入日期分配（合併備份檔）',
+        type='json',
+        key='import_selections_file',
+    )
+    if uploaded_file is not None:
+        try:
+            imported = json.loads(uploaded_file.read().decode('utf-8-sig'))
+            existing_map = {s['name']: s for s in saved_selections}
+            for s in imported:
+                existing_map[s['name']] = s   # 同名者以匯入版本為準
+            merged = list(existing_map.values())
+            _save_selections(SELECTION_PATH, merged)
+            added = len(merged) - len(saved_selections)
+            st.success(f'匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）')
+            st.rerun()
+        except Exception as e:
+            st.error(f'匯入失敗：{e}')
 
     st.divider()
 
