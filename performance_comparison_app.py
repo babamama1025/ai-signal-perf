@@ -534,6 +534,35 @@ with st.sidebar:
         st.session_state['editor_ver'] += 1
         st.rerun()
 
+    # ── 批次勾選／取消（一次多選日期）──────────────────────────────────
+    st.caption('批次操作：多選日期後，一次套用到該幾天的所有時段列。')
+    batch_dates = st.multiselect(
+        '選擇日期（可多選）',
+        options=list(dict.fromkeys(st.session_state['date_df']['日期'])),
+        key='batch_select_dates',
+        label_visibility='collapsed',
+        placeholder='選擇要批次操作的日期',
+    )
+    bcol1, bcol2, bcol3 = st.columns(3)
+
+    def _apply_batch(set_before: bool | None, set_after: bool | None):
+        new_df = st.session_state['date_df'].copy()
+        mask = new_df['日期'].isin(batch_dates)
+        if set_before is not None:
+            new_df.loc[mask, '事前'] = set_before
+        if set_after is not None:
+            new_df.loc[mask, '事後'] = set_after
+        st.session_state['date_df'] = new_df
+        st.session_state['editor_ver'] += 1
+        st.rerun()
+
+    if bcol1.button('✅ 設為事前', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(True, False)
+    if bcol2.button('✅ 設為事後', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(False, True)
+    if bcol3.button('✖ 取消勾選', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(False, False)
+
     edited_df = st.data_editor(
         st.session_state['date_df'],
         key=f'date_editor_{st.session_state["editor_ver"]}',
