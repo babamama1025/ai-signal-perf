@@ -696,6 +696,29 @@ with st.sidebar:
     include_tt  = st.checkbox('包含旅行時間', value=True)
     show_detail = st.checkbox('顯示各路口各方向明細', value=True)
 
+    if st.button('🔍 診斷 GitHub 連線', key='diag_github'):
+        cfg    = st.secrets.get('github', {})
+        token  = cfg.get('token', '')
+        repo   = cfg.get('repo', '')
+        branch = cfg.get('branch', 'main')
+        st.write(f'**secrets 有 github 區塊：** {bool(cfg)}')
+        st.write(f'**token 長度：** {len(token)}，開頭：`{token[:8] if token else "(空)"}...`')
+        st.write(f'**repo：** `{repo}`')
+        st.write(f'**branch：** `{branch}`')
+        if token and repo:
+            headers = {
+                'Authorization': f'token {token}',
+                'Accept': 'application/vnd.github.v3+json',
+            }
+            test_url = f'https://api.github.com/repos/{repo}'
+            try:
+                r = requests.get(test_url, headers=headers, timeout=10)
+                st.write(f'**GET /repos/{repo} → HTTP {r.status_code}**')
+                if not r.ok:
+                    st.error(f'錯誤內容：{r.json().get("message", r.text[:200])}')
+            except Exception as e:
+                st.error(f'連線例外：{type(e).__name__}: {e}')
+
     st.divider()
 
     usable_periods = [p for p in selected_periods if before_by_period[p] and after_by_period[p]]
@@ -768,29 +791,6 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
 
     if msg := st.session_state.pop('_log_msg', None):
         st.success(msg)
-
-    if st.button('🔍 診斷 GitHub 連線', key='diag_github'):
-        cfg    = st.secrets.get('github', {})
-        token  = cfg.get('token', '')
-        repo   = cfg.get('repo', '')
-        branch = cfg.get('branch', 'main')
-        st.write(f'**secrets 有 github 區塊：** {bool(cfg)}')
-        st.write(f'**token 長度：** {len(token)}，開頭：`{token[:8] if token else "(空)"}...`')
-        st.write(f'**repo：** `{repo}`')
-        st.write(f'**branch：** `{branch}`')
-        if token and repo:
-            headers = {
-                'Authorization': f'token {token}',
-                'Accept': 'application/vnd.github.v3+json',
-            }
-            test_url = f'https://api.github.com/repos/{repo}'
-            try:
-                r = requests.get(test_url, headers=headers, timeout=10)
-                st.write(f'**GET /repos/{repo} → HTTP {r.status_code}**')
-                if not r.ok:
-                    st.error(f'錯誤內容：{r.json().get("message", r.text[:200])}')
-            except Exception as e:
-                st.error(f'連線例外：{type(e).__name__}: {e}')
 
 if st.session_state['analysis_results'] is None:
     st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
