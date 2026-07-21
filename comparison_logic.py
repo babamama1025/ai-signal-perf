@@ -155,21 +155,25 @@ def aggregate_periods(
     all_results: dict[str, dict[str, pd.DataFrame]],
     periods: list[str],
     include_travel_time: bool = True,
+    extra_entities: list[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """把多個時段的系統層級比較結果整合成單一「全時段合計」比較表。
 
     - 總停等延滯、通過量：各時段系統層級數值加總後，重新計算差異／改善%
     - 平均停等延滯：由加總後的總停等延滯 / 通過量 計算（避免「平均的平均」）
     - 旅行時間：各路徑／路段的事前、事後平均值取各時段平均
+    - extra_entities：桃園三期等場域的額外彙整欄位（如高鐵周邊、A19周邊、前期範圍）
     """
-    def _sum_system(metric: str) -> tuple[float, float]:
+    entities = ['系統'] + (list(extra_entities) if extra_entities else [])
+
+    def _sum_entity(metric: str, entity: str) -> tuple[float, float]:
         b_sum = a_sum = 0.0
         found = False
         for period in periods:
             mdf = all_results.get(period, {}).get(metric, pd.DataFrame())
             if mdf.empty:
                 continue
-            row = mdf[mdf['欄位'] == '系統']
+            row = mdf[mdf['欄位'] == entity]
             if row.empty:
                 continue
             b, a = row['事前平均'].values[0], row['事後平均'].values[0]
@@ -182,23 +186,27 @@ def aggregate_periods(
 
     result: dict[str, pd.DataFrame] = {}
 
-    b_delay, a_delay = _sum_system('總停等延滯')
-    b_vol,   a_vol   = _sum_system('通過量')
+    # 先計算各實體的延滯與通過量，供後續平均停等延滯使用
+    entity_delay: dict[str, tuple[float, float]] = {e: _sum_entity('總停等延滯', e) for e in entities}
+    entity_vol:   dict[str, tuple[float, float]] = {e: _sum_entity('通過量', e)     for e in entities}
 
-    for metric, b, a in (('總停等延滯', b_delay, a_delay), ('通過量', b_vol, a_vol)):
-        diff = a - b if not (pd.isna(a) or pd.isna(b)) else float('nan')
-        result[metric] = pd.DataFrame(
-            [['系統', b, a, diff, _improvement_pct(b, a, metric)]],
-            columns=['欄位', '事前平均', '事後平均', '差異', '改善%'],
-        )
+    for metric, entity_sums in (('總停等延滯', entity_delay), ('通過量', entity_vol)):
+        rows = []
+        for entity in entities:
+            b, a = entity_sums[entity]
+            diff = a - b if not (pd.isna(a) or pd.isna(b)) else float('nan')
+            rows.append([entity, b, a, diff, _improvement_pct(b, a, metric)])
+        result[metric] = pd.DataFrame(rows, columns=['欄位', '事前平均', '事後平均', '差異', '改善%'])
 
-    b_avg = b_delay / b_vol if _valid_ratio(b_delay, b_vol) else float('nan')
-    a_avg = a_delay / a_vol if _valid_ratio(a_delay, a_vol) else float('nan')
-    diff_avg = a_avg - b_avg if not (pd.isna(a_avg) or pd.isna(b_avg)) else float('nan')
-    result['平均停等延滯'] = pd.DataFrame(
-        [['系統', b_avg, a_avg, diff_avg, _improvement_pct(b_avg, a_avg, '平均停等延滯')]],
-        columns=['欄位', '事前平均', '事後平均', '差異', '改善%'],
-    )
+    avg_rows = []
+    for entity in entities:
+        b_delay, a_delay = entity_delay[entity]
+        b_vol,   a_vol   = entity_vol[entity]
+        b_avg = b_delay / b_vol if _valid_ratio(b_delay, b_vol) else float('nan')
+        a_avg = a_delay / a_vol if _valid_ratio(a_delay, a_vol) else float('nan')
+        diff_avg = a_avg - b_avg if not (pd.isna(a_avg) or pd.isna(b_avg)) else float('nan')
+        avg_rows.append([entity, b_avg, a_avg, diff_avg, _improvement_pct(b_avg, a_avg, '平均停等延滯')])
+    result['平均停等延滯'] = pd.DataFrame(avg_rows, columns=['欄位', '事前平均', '事後平均', '差異', '改善%'])
 
     if include_travel_time:
         tt_before: dict[str, list[float]] = {}

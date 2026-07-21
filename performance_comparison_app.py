@@ -19,6 +19,9 @@ SITE_OPTIONS = {
     '桃園三期(高鐵)': 'perf_summary_3.csv',
 }
 
+# 桃園三期額外需要納入概覽與總表的系統層級欄位
+SITE3_EXTRA_ENTITIES = ['高鐵周邊', 'A19周邊', '前期範圍']
+
 # ── 場域預設時段（平日 / 假日）─────────────────────────────────────────────
 # 修改此區塊可調整各場域的預設勾選時段
 SITE_DEFAULTS = {
@@ -98,24 +101,31 @@ def _highlight_pct_col(col_series, raw_pct: pd.Series):
     return styles
 
 
-def _display_overview_table(results: dict, inc_tt: bool):
-    """系統層級改善率概覽表格（替代原概覽長條圖）。"""
+def _display_overview_table(results: dict, inc_tt: bool, extra_entities: list[str] | None = None):
+    """系統層級改善率概覽表格（替代原概覽長條圖）。
+    extra_entities：桃園三期等場域需額外顯示的系統層級欄位（如高鐵周邊、A19周邊、前期範圍）。
+    """
     base_metrics = ['總停等延滯', '通過量', '平均停等延滯']
     row_labels   = ['事前平均', '事後平均', '差異', '改善(%)']
 
+    all_entities = ['系統'] + (list(extra_entities) if extra_entities else [])
+    multi_entity = len(all_entities) > 1
+
     col_raw: dict[str, dict] = {}
 
-    for metric in base_metrics:
-        mdf = results.get(metric, pd.DataFrame())
-        if not mdf.empty:
-            sys_row = mdf[mdf['欄位'] == '系統']
-            if not sys_row.empty:
-                col_raw[metric] = {
-                    '事前平均': sys_row['事前平均'].values[0],
-                    '事後平均': sys_row['事後平均'].values[0],
-                    '差異':     sys_row['差異'].values[0],
-                    '改善(%)':  sys_row['改善%'].values[0],
-                }
+    for entity in all_entities:
+        for metric in base_metrics:
+            mdf = results.get(metric, pd.DataFrame())
+            if not mdf.empty:
+                e_row = mdf[mdf['欄位'] == entity]
+                if not e_row.empty:
+                    col_key = f"{entity}_{metric}" if multi_entity else metric
+                    col_raw[col_key] = {
+                        '事前平均': e_row['事前平均'].values[0],
+                        '事後平均': e_row['事後平均'].values[0],
+                        '差異':     e_row['差異'].values[0],
+                        '改善(%)':  e_row['改善%'].values[0],
+                    }
 
     if inc_tt:
         tt_df = results.get('旅行時間', pd.DataFrame())
@@ -136,7 +146,7 @@ def _display_overview_table(results: dict, inc_tt: bool):
     raw_imp: dict[str, float]     = {}
 
     for col_name, vals in col_raw.items():
-        is_vol = (col_name == '通過量')
+        is_vol = col_name == '通過量' or (multi_entity and col_name.endswith('_通過量'))
         def _fmt(v, vol=is_vol):
             return '—' if pd.isna(v) else (f"{v:,.0f}" if vol else f"{v:,.1f}")
         display_data[col_name] = [
@@ -387,9 +397,10 @@ if not CSV_PATH.exists():
 df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
 dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
 
-all_dates   = dl.get_available_dates(df)
-all_periods = dl.get_available_periods(df)
-system_cols = dl.get_system_columns()
+all_dates      = dl.get_available_dates(df)
+all_periods    = dl.get_available_periods(df)
+system_cols    = dl.get_system_columns()
+extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)' else []
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
@@ -852,8 +863,8 @@ st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=Tr
 # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
 st.subheader('📊 系統層級改善率概覽')
 st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
-overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt)
-_display_overview_table(overview_all, inc_tt)
+overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
+_display_overview_table(overview_all, inc_tt, extra_entities)
 
 st.divider()
 
@@ -862,7 +873,7 @@ st.subheader('📊 各時段系統層級改善率概覽')
 for period, results in all_results.items():
     if len(all_results) > 1:
         st.markdown(f"**⏱ {period}**")
-    _display_overview_table(results, inc_tt)
+    _display_overview_table(results, inc_tt, extra_entities)
 
 # ── 分析摘要 ──────────────────────────────────────────────────────────────────
 with st.expander('📝 分析摘要（展開）', expanded=True):
@@ -926,6 +937,7 @@ if st.button('產生 Excel 報告'):
             include_travel_time=inc_tt,
             raw_df=df if include_raw else None,
             raw_periods=periods if include_raw else None,
+            extra_summary_entities=extra_entities,
         )
     ts = datetime.now().strftime('%Y%m%d_%H%M')
     st.download_button(

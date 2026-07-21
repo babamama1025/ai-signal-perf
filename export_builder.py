@@ -30,12 +30,14 @@ def build_comparison_xlsx(
     include_travel_time: bool = True,
     raw_df: pd.DataFrame | None = None,
     raw_periods: list | None = None,
+    extra_summary_entities: list[str] | None = None,
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
 
     _build_info_sheet(wb, before_by_period, after_by_period)
-    _build_summary_sheet(wb, all_results, before_by_period, after_by_period)
+    _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
+                         extra_summary_entities=extra_summary_entities)
     for period, results in all_results.items():
         _build_period_sheet(
             wb, period, results,
@@ -94,12 +96,15 @@ def _build_info_sheet(wb, before_by_period, after_by_period):
     ws.column_dimensions['A'].width = 28
 
 
-def _build_summary_sheet(wb, all_results, before_by_period, after_by_period):
+def _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
+                          extra_summary_entities: list[str] | None = None):
     ws = wb.create_sheet('總表')
     periods = list(all_results.keys())
+    extra_entities = list(extra_summary_entities) if extra_summary_entities else []
 
     # 「全時段合計」：總停等延滯／通過量加總、平均停等延滯由加總重新推導（不含旅行時間）
-    aggregated = aggregate_periods(all_results, periods, include_travel_time=False)
+    aggregated = aggregate_periods(all_results, periods, include_travel_time=False,
+                                   extra_entities=extra_entities or None)
     n_before_all = sum(len(before_by_period.get(p, [])) for p in periods)
     n_after_all  = sum(len(after_by_period.get(p, [])) for p in periods)
 
@@ -129,19 +134,15 @@ def _build_summary_sheet(wb, all_results, before_by_period, after_by_period):
 
     row = 3
     first_period = periods[0]
-    # 系統總量欄：由 data_loader.get_system_columns() 決定（不硬編碼）
-    import data_loader as _dl
-    sys_col_names = _dl.get_system_columns()
-    sys_display = [_dl.get_display_name(c) for c in sys_col_names]
-
     metrics_in_results = [k for k in all_results[first_period] if k != '旅行時間']
     for metric in metrics_in_results:
+        # 指標標題列（顯示系統層級數據）
         ws.cell(row, 1, metric).font = FONT_WHITE_BOLD
         ws.cell(row, 1).fill = FILL_HEADER
         for i, (_, results_dict, _n_before, _n_after) in enumerate(col_blocks):
             c = col_start + i * 4
             df = results_dict.get(metric, pd.DataFrame())
-            r = df[df['欄位'].isin(sys_display)] if not df.empty else pd.DataFrame()
+            r = df[df['欄位'] == '系統'] if not df.empty else pd.DataFrame()
             if not r.empty:
                 b, a = r['事前平均'].values[0], r['事後平均'].values[0]
                 diff, pct = r['差異'].values[0], r['改善%'].values[0]
@@ -153,6 +154,26 @@ def _build_summary_sheet(wb, all_results, before_by_period, after_by_period):
                 _apply_num_format(ws.cell(row, c + 2), metric)
                 _write_pct(ws.cell(row, c + 3), pct)
         row += 1
+
+        # 額外實體子列（桃園三期：高鐵周邊、A19周邊、前期範圍）
+        for entity in extra_entities:
+            ws.cell(row, 1, f'  {entity}').font = FONT_NORMAL
+            ws.cell(row, 1).fill = FILL_SUBHEADER
+            for i, (_, results_dict, _n_before, _n_after) in enumerate(col_blocks):
+                c = col_start + i * 4
+                df = results_dict.get(metric, pd.DataFrame())
+                r = df[df['欄位'] == entity] if not df.empty else pd.DataFrame()
+                if not r.empty:
+                    b, a = r['事前平均'].values[0], r['事後平均'].values[0]
+                    diff, pct = r['差異'].values[0], r['改善%'].values[0]
+                    ws.cell(row, c, b if not pd.isna(b) else None)
+                    ws.cell(row, c + 1, a if not pd.isna(a) else None)
+                    ws.cell(row, c + 2, diff if not pd.isna(diff) else None)
+                    _apply_num_format(ws.cell(row, c), metric)
+                    _apply_num_format(ws.cell(row, c + 1), metric)
+                    _apply_num_format(ws.cell(row, c + 2), metric)
+                    _write_pct(ws.cell(row, c + 3), pct)
+            row += 1
 
     # 欄寬
     ws.column_dimensions['A'].width = 18
