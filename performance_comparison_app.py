@@ -12,6 +12,12 @@ import data_loader as dl
 import comparison_logic as cl
 import chart_builder as cb
 import export_builder as eb
+import numpy as np
+import plotly.graph_objects as go
+import ts_loader as tsl
+from ts_config_4 import (ETAG_PATH_LIST, ETAG_LINK_CONFIG,
+                          INTERSECTION_COLS, APPROACH_COLS)
+
 
 # ── 場域選項 ────────────────────────────────────────────────────────────────
 SITE_OPTIONS = {
@@ -360,6 +366,161 @@ def _period_status_map(log_df: pd.DataFrame, periods: list[str]) -> dict[tuple[s
 def _load_df(csv_path: str, _mtime: float):
     df = dl.load_performance_csv(Path(csv_path))
     return df, dict(dl.get_column_structure())
+
+
+# ── 時序數據分析輔助函式 ──────────────────────────────────────────────────────
+def _render_flow_trend(df_perf: pd.DataFrame) -> None:
+    """多日流量趨勢分析（從 perf_summary）。"""
+    all_periods_perf = sorted(df_perf['時段'].dropna().unique().tolist())
+    all_metrics = ['總停等延滯', '通過量', '平均停等延滯']
+
+    c1, c2, c3 = st.columns(3)
+    level      = c1.radio('分析層級', ['系統', '路口', '各來向'], key='ts_level')
+    metric     = c2.radio('指標',     all_metrics,               key='ts_metric')
+    sel_periods = c3.multiselect('時段', all_periods_perf,
+                                  default=all_periods_perf, key='ts_periods')
+
+    if level == '路口':
+        sel_ints = st.multiselect('路口', INTERSECTION_COLS,
+                                   default=INTERSECTION_COLS, key='ts_ints')
+        columns = sel_ints
+    elif level == '各來向':
+        sel_int  = st.selectbox('路口', INTERSECTION_COLS, key='ts_int')
+        approaches   = APPROACH_COLS.get(sel_int, [])
+        ap_disp      = [a[0] for a in approaches]
+        sel_ap_names = st.multiselect('來向', ap_disp, default=ap_disp, key='ts_ap')
+        columns = [a[1] for a in approaches if a[0] in sel_ap_names]
+    else:
+        columns = ['系統']
+
+    if not columns or not sel_periods:
+        st.info('請選擇要分析的時段與欄位')
+        return
+
+    trend_df = tsl.get_perf_trend(df_perf, metric, columns, sel_periods)
+    if trend_df.empty:
+        st.warning('無法取得趨勢資料，請確認資料中包含所選指標與時段')
+        return
+
+    _TW_DOW = ['一', '二', '三', '四', '五', '六', '日']
+    unit = '輛/小時' if metric == '通過量' else '秒'
+
+    weekday_mask = trend_df.index.dayofweek < 5
+    splits = [
+        ('平常日（一～五）', trend_df[weekday_mask]),
+        ('週末（六、日）',   trend_df[~weekday_mask]),
+    ]
+
+    for day_label, sub_df in splits:
+        sub_df = sub_df.dropna(how='all')
+        fig = go.Figure()
+        for col in sub_df.columns:
+            if isinstance(col, tuple):
+                period_lbl, col_name = col
+                series_name = f'{period_lbl} - {col_name}' if len(sel_periods) > 1 else col_name
+            else:
+                series_name = str(col)
+            s = sub_df[col].dropna()
+            if s.empty:
+                continue
+            x_labels = [
+                f'{d.strftime("%b")} {d.day}, {d.year} ({_TW_DOW[d.dayofweek]})'
+                for d in s.index
+            ]
+            fig.add_trace(go.Scatter(x=x_labels, y=s.values, mode='lines+markers', name=series_name))
+        fig.update_layout(
+            title=f'{metric} 多日趨勢　{day_label}',
+            xaxis=dict(title='日期', type='category', tickangle=-45),
+            yaxis_title=f'{metric}（{unit}）',
+            hovermode='x unified',
+            height=430,
+            margin=dict(t=40, b=80),
+        )
+        if fig.data:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption(f'（{day_label}：無資料）')
+
+
+def _render_travel_time(df_tt: pd.DataFrame) -> None:
+    """短期旅行時間路徑多日比較分析。"""
+    avail_dates = sorted(df_tt['time'].dt.date.unique())
+    avail_ts    = [pd.Timestamp(d) for d in avail_dates]
+    date_labels = [d.strftime('%Y/%m/%d') for d in avail_ts]
+    path_names  = [p['name'] for p in ETAG_PATH_LIST]
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        sel_path_name = st.selectbox('路徑', path_names, key='tt_path')
+        agg_min = st.radio('聚合時距', [5, 15, 30],
+                            format_func=lambda x: f'{x} 分鐘',
+                            horizontal=True, key='tt_agg')
+    with c2:
+        default_dates    = date_labels[-7:] if len(date_labels) >= 7 else date_labels
+        sel_date_labels  = st.multiselect('分析日期（可多選）', date_labels,
+                                           default=default_dates, key='tt_dates')
+        tc1, tc2 = st.columns(2)
+        time_start = tc1.text_input('開始時間', value='06:00', key='tt_t0')
+        time_end   = tc2.text_input('結束時間', value='22:00', key='tt_t1')
+
+    if not sel_date_labels:
+        st.info('請選擇至少一個分析日期')
+        return
+
+    path_cfg = next((p for p in ETAG_PATH_LIST if p['name'] == sel_path_name), None)
+    if path_cfg is None:
+        return
+
+    sel_dates = [avail_ts[date_labels.index(lbl)] for lbl in sel_date_labels]
+    with st.spinner('計算旅行時間…'):
+        result_df = tsl.compute_path_tt(
+            df_tt, path_cfg['path'], sel_dates, time_start, time_end, agg_min
+        )
+
+    if result_df.empty:
+        st.warning('無旅行時間資料，請確認日期與時間範圍')
+        return
+
+    fig = go.Figure()
+    for col in result_df.columns:
+        s = result_df[col].dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines+markers', name=col))
+    fig.update_layout(
+        title=f'{sel_path_name} 旅行時間比較',
+        xaxis_title='時間',
+        yaxis_title='旅行時間（秒）',
+        hovermode='x unified',
+        height=480,
+        margin=dict(t=40, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(
+        result_df.style.format('{:.0f}', na_rep='—'),
+        use_container_width=True,
+        height=300,
+    )
+
+
+def _render_timeseries_tab() -> None:
+    """時序數據分析 Tab 主體（兩個子 Tab）。"""
+    _sub_flow, _sub_tt = st.tabs(['📊 每日趨勢分析', '🛣️ 旅行時間分析'])
+
+    with _sub_flow:
+        df_perf = tsl.load_perf_summary(selected_site)
+        if df_perf is None:
+            st.warning('找不到績效摘要資料')
+        else:
+            _render_flow_trend(df_perf)
+
+    with _sub_tt:
+        if selected_site != '桃園四期(大湳)':
+            st.info('旅行時間分析目前僅支援桃園四期(大湳)')
+        else:
+            df_tt = tsl.load_traveltime(selected_site)
+            if df_tt is None:
+                st.warning('找不到旅行時間資料')
+            else:
+                _render_travel_time(df_tt)
 
 
 # ── 場域選擇（側邊欄最頂部，資料載入前先取得選擇）──────────────────────────
@@ -751,157 +912,164 @@ with st.sidebar:
 st.title('🚦 AI 號誌事前後分析系統')
 st.subheader(f'場域：{selected_site}')
 
-# ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
-with st.expander('📋 AI 操作紀錄', expanded=False):
-    st.caption(
-        f'紀錄檔：`{LOG_PATH.name}`（位於 data 資料夾，可用 Excel 直接開啟修改）  \n'
-        '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
-        '**時段**欄請填「全天」或任意「HH:MM~HH:MM」時間範圍（不限於分析時段清單，'
-        '系統會自動判斷分析時段是否完整落在此範圍內）'
-    )
-    log_df_ui = _load_log()
-    edited_log = st.data_editor(
-        log_df_ui,
-        column_config={
-            '日期': st.column_config.TextColumn('日期 (YYYY/MM/DD)', width='small'),
-            '時段': st.column_config.TextColumn(
-                '時段（全天 或 HH:MM~HH:MM）', width='medium'
-            ),
-            '狀態': st.column_config.SelectboxColumn(
-                '狀態', options=['啟動', '關閉'], width='small'
-            ),
-            '備註': st.column_config.TextColumn(
-                '備註（如：設備維護、颱風停班）', width='large'
-            ),
-        },
-        num_rows='dynamic',
-        use_container_width=True,
-        hide_index=True,
-        key='log_editor',
-    )
-    if st.button('💾 儲存操作紀錄', key='save_log'):
-        errors = _validate_log_periods(edited_log)
-        if errors:
-            st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
-        else:
-            synced = _save_log(edited_log)
-            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
-            st.session_state['_log_msg'] = f'✅ 已儲存 {LOG_PATH.name}{suffix}'
-            st.rerun()
+_tab_ba, _tab_ts = st.tabs(['📊 事前後分析', '📈 時序數據分析'])
 
-    if msg := st.session_state.pop('_log_msg', None):
-        st.success(msg)
+with _tab_ba:
 
-if st.session_state['analysis_results'] is None:
-    st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
-    st.markdown("""
-**使用步驟：**
-1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
-2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
-3. 「日期分配」表已依「AI 操作紀錄」自動判斷各日期＋時段的事前／事後（無紀錄視為定時時制／事前），
-   可視需要用「⚡ 依操作紀錄自動填入」限縮至特定日期範圍，或直接手動勾選
-4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
-5. 點擊「執行分析」
-""")
-    st.stop()
-
-# 取出分析結果
-saved           = st.session_state['analysis_results']
-all_results     = saved['results']
-bd_by_period    = saved['before_by_period']
-ad_by_period    = saved['after_by_period']
-periods         = saved['periods']
-inc_tt          = saved['include_tt']
-
-# ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
-summary_rows = [
-    {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
-    for p in periods
-]
-st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
-
-# ── 全時段合計概覽 ────────────────────────────────────────────────────────────
-st.subheader('📊 系統層級改善率概覽')
-st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
-overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt)
-_display_overview_table(overview_all, inc_tt)
-
-st.divider()
-
-# ── 概覽表 ────────────────────────────────────────────────────────────────────
-st.subheader('📊 各時段系統層級改善率概覽')
-for period, results in all_results.items():
-    if len(all_results) > 1:
-        st.markdown(f"**⏱ {period}**")
-    _display_overview_table(results, inc_tt)
-
-# ── 分析摘要 ──────────────────────────────────────────────────────────────────
-with st.expander('📝 分析摘要（展開）', expanded=True):
-    before_counts = {p: len(bd_by_period[p]) for p in periods}
-    after_counts  = {p: len(ad_by_period[p]) for p in periods}
-    st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
-
-st.divider()
-
-# ── 分頁：每個時段一個分頁 ────────────────────────────────────────────────────
-tab_containers = st.tabs(periods) if len(periods) > 1 else [st.container()]
-
-for i, period in enumerate(periods):
-    results = all_results.get(period, {})
-    with tab_containers[i]:
-        for metric in ['總停等延滯', '通過量', '平均停等延滯']:
-            comp_df = results.get(metric, pd.DataFrame())
-            st.subheader(f'📊 {metric}')
-            if comp_df.empty:
-                st.warning(f'無 {metric} 資料')
-                continue
-
-            display_df, raw_pct = _format_comp_df(comp_df, metric)
-            st.dataframe(
-                display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.plotly_chart(
-                cb.make_metric_bar_chart(comp_df, metric, period),
-                use_container_width=True,
-            )
-
-        if inc_tt:
-            tt_df = results.get('旅行時間', pd.DataFrame())
-            if not tt_df.empty:
-                st.subheader('🛣️ 旅行時間')
-                disp_tt, raw_pct_tt = _format_comp_df(tt_df, '旅行時間')
-                st.dataframe(
-                    disp_tt.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct_tt),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.plotly_chart(
-                    cb.make_travel_time_chart(tt_df, period),
-                    use_container_width=True,
-                )
-
-# ── Excel 匯出 ────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader('💾 匯出報告')
-include_raw = st.checkbox(
-    '包含原始資料工作表',
-    value=False,
-    help='勾選後，Excel 報告末頁會加入「原始資料」工作表，列出所選日期的完整數據',
-)
-if st.button('產生 Excel 報告'):
-    with st.spinner('產生 Excel 中…'):
-        buf = eb.build_comparison_xlsx(
-            all_results, bd_by_period, ad_by_period,
-            include_travel_time=inc_tt,
-            raw_df=df if include_raw else None,
-            raw_periods=periods if include_raw else None,
+    # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
+    with st.expander('📋 AI 操作紀錄', expanded=False):
+        st.caption(
+            f'紀錄檔：`{LOG_PATH.name}`（位於 data 資料夾，可用 Excel 直接開啟修改）  \n'
+            '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
+            '**時段**欄請填「全天」或任意「HH:MM~HH:MM」時間範圍（不限於分析時段清單，'
+            '系統會自動判斷分析時段是否完整落在此範圍內）'
         )
-    ts = datetime.now().strftime('%Y%m%d_%H%M')
-    st.download_button(
-        label='⬇️ 下載 Excel 報告',
-        data=buf,
-        file_name=f'績效比較_{selected_site}_{ts}.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    )
+        log_df_ui = _load_log()
+        edited_log = st.data_editor(
+            log_df_ui,
+            column_config={
+                '日期': st.column_config.TextColumn('日期 (YYYY/MM/DD)', width='small'),
+                '時段': st.column_config.TextColumn(
+                    '時段（全天 或 HH:MM~HH:MM）', width='medium'
+                ),
+                '狀態': st.column_config.SelectboxColumn(
+                    '狀態', options=['啟動', '關閉'], width='small'
+                ),
+                '備註': st.column_config.TextColumn(
+                    '備註（如：設備維護、颱風停班）', width='large'
+                ),
+            },
+            num_rows='dynamic',
+            use_container_width=True,
+            hide_index=True,
+            key='log_editor',
+        )
+        if st.button('💾 儲存操作紀錄', key='save_log'):
+            errors = _validate_log_periods(edited_log)
+            if errors:
+                st.error('時段欄位有誤，請修正後再儲存：\n' + '\n'.join(f'- {e}' for e in errors))
+            else:
+                synced = _save_log(edited_log)
+                suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
+                st.session_state['_log_msg'] = f'✅ 已儲存 {LOG_PATH.name}{suffix}'
+                st.rerun()
+
+        if msg := st.session_state.pop('_log_msg', None):
+            st.success(msg)
+
+    if st.session_state['analysis_results'] is None:
+        st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
+        st.markdown("""
+    **使用步驟：**
+    1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
+    2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
+    3. 「日期分配」表已依「AI 操作紀錄」自動判斷各日期＋時段的事前／事後（無紀錄視為定時時制／事前），
+       可視需要用「⚡ 依操作紀錄自動填入」限縮至特定日期範圍，或直接手動勾選
+    4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
+    5. 點擊「執行分析」
+    """)
+    else:
+
+        # 取出分析結果
+        saved           = st.session_state['analysis_results']
+        all_results     = saved['results']
+        bd_by_period    = saved['before_by_period']
+        ad_by_period    = saved['after_by_period']
+        periods         = saved['periods']
+        inc_tt          = saved['include_tt']
+
+        # ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
+        summary_rows = [
+            {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
+            for p in periods
+        ]
+        st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+        # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
+        st.subheader('📊 系統層級改善率概覽')
+        st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
+        overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt)
+        _display_overview_table(overview_all, inc_tt)
+
+        st.divider()
+
+        # ── 概覽表 ────────────────────────────────────────────────────────────────────
+        st.subheader('📊 各時段系統層級改善率概覽')
+        for period, results in all_results.items():
+            if len(all_results) > 1:
+                st.markdown(f"**⏱ {period}**")
+            _display_overview_table(results, inc_tt)
+
+        # ── 分析摘要 ──────────────────────────────────────────────────────────────────
+        with st.expander('📝 分析摘要（展開）', expanded=True):
+            before_counts = {p: len(bd_by_period[p]) for p in periods}
+            after_counts  = {p: len(ad_by_period[p]) for p in periods}
+            st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
+
+        st.divider()
+
+        # ── 分頁：每個時段一個分頁 ────────────────────────────────────────────────────
+        tab_containers = st.tabs(periods) if len(periods) > 1 else [st.container()]
+
+        for i, period in enumerate(periods):
+            results = all_results.get(period, {})
+            with tab_containers[i]:
+                for metric in ['總停等延滯', '通過量', '平均停等延滯']:
+                    comp_df = results.get(metric, pd.DataFrame())
+                    st.subheader(f'📊 {metric}')
+                    if comp_df.empty:
+                        st.warning(f'無 {metric} 資料')
+                        continue
+
+                    display_df, raw_pct = _format_comp_df(comp_df, metric)
+                    st.dataframe(
+                        display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.plotly_chart(
+                        cb.make_metric_bar_chart(comp_df, metric, period),
+                        use_container_width=True,
+                    )
+
+                if inc_tt:
+                    tt_df = results.get('旅行時間', pd.DataFrame())
+                    if not tt_df.empty:
+                        st.subheader('🛣️ 旅行時間')
+                        disp_tt, raw_pct_tt = _format_comp_df(tt_df, '旅行時間')
+                        st.dataframe(
+                            disp_tt.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct_tt),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.plotly_chart(
+                            cb.make_travel_time_chart(tt_df, period),
+                            use_container_width=True,
+                        )
+
+        # ── Excel 匯出 ────────────────────────────────────────────────────────────────
+        st.divider()
+        st.subheader('💾 匯出報告')
+        include_raw = st.checkbox(
+            '包含原始資料工作表',
+            value=False,
+            help='勾選後，Excel 報告末頁會加入「原始資料」工作表，列出所選日期的完整數據',
+        )
+        if st.button('產生 Excel 報告'):
+            with st.spinner('產生 Excel 中…'):
+                buf = eb.build_comparison_xlsx(
+                    all_results, bd_by_period, ad_by_period,
+                    include_travel_time=inc_tt,
+                    raw_df=df if include_raw else None,
+                    raw_periods=periods if include_raw else None,
+                )
+            ts = datetime.now().strftime('%Y%m%d_%H%M')
+            st.download_button(
+                label='⬇️ 下載 Excel 報告',
+                data=buf,
+                file_name=f'績效比較_{selected_site}_{ts}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+
+with _tab_ts:
+    _render_timeseries_tab()
