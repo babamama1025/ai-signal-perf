@@ -249,6 +249,19 @@ def _save_selections(path: Path, selections: list[dict]) -> bool:
     )
 
 
+@st.dialog('刪除日期分配')
+def _delete_dialog(cur_name: str, selections: list):
+    st.write(f'確認要刪除「{cur_name}」？刪除後將無法恢復。')
+    col_ok, col_cancel = st.columns(2)
+    if col_ok.button('確認', use_container_width=True, type='primary'):
+        remaining = [s for s in selections if s['name'] != cur_name]
+        _save_selections(SELECTION_PATH, remaining)
+        st.session_state['_edit_msg'] = f'✅ 已刪除「{cur_name}」'
+        st.rerun()
+    if col_cancel.button('取消', use_container_width=True):
+        st.rerun()
+
+
 @st.dialog('重新命名日期分配')
 def _rename_dialog(cur_name: str, selections: list):
     st.write(f'將「{cur_name}」修改為：')
@@ -646,20 +659,7 @@ with st.sidebar:
             _rename_dialog(cur_name, saved_selections)
 
         if st.button(f'🗑️ 刪除「{cur_name}」', use_container_width=True):
-            st.session_state['_confirm_delete'] = cur_name
-
-        if st.session_state.get('_confirm_delete') == cur_name:
-            st.warning(f'確定要刪除「{cur_name}」嗎？刪除後無法恢復。')
-            col_yes, col_no = st.columns(2)
-            if col_yes.button('確認刪除', use_container_width=True, type='primary'):
-                remaining = [s for s in saved_selections if s['name'] != cur_name]
-                _save_selections(SELECTION_PATH, remaining)
-                st.session_state.pop('_confirm_delete', None)
-                st.session_state['_edit_msg'] = f'✅ 已刪除「{cur_name}」'
-                st.rerun()
-            if col_no.button('取消', use_container_width=True):
-                st.session_state.pop('_confirm_delete', None)
-                st.rerun()
+            _delete_dialog(cur_name, saved_selections)
 
     st.download_button(
         '📤 匯出所有已儲存的日期分配',
