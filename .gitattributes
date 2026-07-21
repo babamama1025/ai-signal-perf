@@ -1,0 +1,11 @@
+# 即時營運資料檔：由 app 在 main 分支上自動同步（使用者透過網頁操作觸發）。
+# 這些檔案不應該在 feature 分支上被編輯或合併進去，merge=ours 確保
+# 任何分支合併回 main 時，一律保留 main 上的最新版本，不會被過時的
+# feature 分支內容覆蓋。
+# 注意：merge=ours 驅動需要每個開發環境各自執行一次
+#   git config merge.ours.driver true
+# 這個設定不會隨 repo 同步，clone 新環境時要記得補設定。
+data/date_selections_3.json merge=ours
+data/date_selections_4.json merge=ours
+data/ai_operation_log_3.csv merge=ours
+data/ai_operation_log_4.csv merge=ours
