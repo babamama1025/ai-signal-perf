@@ -404,17 +404,18 @@ extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)'
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
-def _make_date_period_df(periods: list[str], log_df: pd.DataFrame, is_weekend: bool = False) -> pd.DataFrame:
+def _make_date_period_df(periods: list[str], log_df: pd.DataFrame,
+                          is_weekend: bool = False, filter_by_type: bool = True) -> pd.DataFrame:
     """
     建立「日期 × 時段」分配表（長格式，每列為一個日期＋時段組合）。
     狀態完全依 AI 操作紀錄判斷：啟動 → 事後；關閉或無紀錄 → 事前
     （無操作紀錄視為預設開啟定時時制 TOD）。
-    is_weekend：True 時只保留週六日；False 時只保留週一～五。
+    filter_by_type：True 時依 is_weekend 過濾日期；False 時顯示全部日期。
     """
     status_map = _period_status_map(log_df, periods)
     rows = []
     for d in all_dates:
-        if (d.weekday() >= 5) != is_weekend:
+        if filter_by_type and (d.weekday() >= 5) != is_weekend:
             continue
         d_str = d.strftime('%Y/%m/%d')
         for p in periods:
@@ -481,11 +482,16 @@ with st.sidebar:
         key=periods_widget_key,   # 切換場域或日期類型時自動重置
     )
 
+    # 日期類型過濾 checkbox 在後方才渲染，先從 session state 讀取上一次的值
+    _filter_by_day_type = st.session_state.get('filter_by_day_type', True)
+
     # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
-    periods_key = (selected_site, day_type, tuple(sorted(selected_periods)))
+    periods_key = (selected_site, day_type, tuple(sorted(selected_periods)), _filter_by_day_type)
     if st.session_state.get('_periods_key') != periods_key:
         st.session_state['_periods_key'] = periods_key
-        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log(), is_weekend)
+        st.session_state['date_df'] = _make_date_period_df(
+            selected_periods, _load_log(), is_weekend, _filter_by_day_type,
+        )
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     st.divider()
@@ -547,6 +553,13 @@ with st.sidebar:
         st.session_state['date_df'] = cleared_df
         st.session_state['editor_ver'] += 1
         st.rerun()
+
+    st.checkbox(
+        '只顯示符合日期類型的日期',
+        value=True,
+        key='filter_by_day_type',
+        help='取消勾選可同時顯示平常日與週末，適合跨類型比較分析',
+    )
 
     # ── 批次勾選／取消（一次多選日期）──────────────────────────────────
     st.caption('批次操作：多選日期後，一次套用到該幾天的所有時段列。')
@@ -650,8 +663,10 @@ with st.sidebar:
             return
         valid_periods = [p for p in preset['periods'] if p in all_periods]
         preset_is_weekend = preset['day_type'] == '週末（六、日）'
+        filter_by_type = st.session_state.get('filter_by_day_type', True)
 
-        # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍，並過濾符合日期類型的列
+        # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍
+        # filter_by_type 開啟時過濾不符日期類型的列
         base_df = pd.DataFrame(
             [
                 {
@@ -663,7 +678,8 @@ with st.sidebar:
                 }
                 for r in preset['rows']
                 if r['時段'] in valid_periods
-                and (pd.Timestamp(r['日期']).weekday() >= 5) == preset_is_weekend
+                and (not filter_by_type
+                     or (pd.Timestamp(r['日期']).weekday() >= 5) == preset_is_weekend)
             ],
             columns=['日期', '星期', '時段', '事前', '事後'],
         )
