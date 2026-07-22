@@ -404,15 +404,18 @@ extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)'
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
-def _make_date_period_df(periods: list[str], log_df: pd.DataFrame) -> pd.DataFrame:
+def _make_date_period_df(periods: list[str], log_df: pd.DataFrame, is_weekend: bool = False) -> pd.DataFrame:
     """
     建立「日期 × 時段」分配表（長格式，每列為一個日期＋時段組合）。
     狀態完全依 AI 操作紀錄判斷：啟動 → 事後；關閉或無紀錄 → 事前
     （無操作紀錄視為預設開啟定時時制 TOD）。
+    is_weekend：True 時只保留週六日；False 時只保留週一～五。
     """
     status_map = _period_status_map(log_df, periods)
     rows = []
     for d in all_dates:
+        if (d.weekday() >= 5) != is_weekend:
+            continue
         d_str = d.strftime('%Y/%m/%d')
         for p in periods:
             status = status_map.get((d_str, p), '關閉')
@@ -482,7 +485,7 @@ with st.sidebar:
     periods_key = (selected_site, day_type, tuple(sorted(selected_periods)))
     if st.session_state.get('_periods_key') != periods_key:
         st.session_state['_periods_key'] = periods_key
-        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
+        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log(), is_weekend)
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     st.divider()
@@ -646,8 +649,9 @@ with st.sidebar:
         if preset is None:
             return
         valid_periods = [p for p in preset['periods'] if p in all_periods]
+        preset_is_weekend = preset['day_type'] == '週末（六、日）'
 
-        # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍
+        # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍，並過濾符合日期類型的列
         base_df = pd.DataFrame(
             [
                 {
@@ -659,6 +663,7 @@ with st.sidebar:
                 }
                 for r in preset['rows']
                 if r['時段'] in valid_periods
+                and (pd.Timestamp(r['日期']).weekday() >= 5) == preset_is_weekend
             ],
             columns=['日期', '星期', '時段', '事前', '事後'],
         )
