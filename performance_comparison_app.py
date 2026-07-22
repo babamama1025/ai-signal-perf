@@ -709,6 +709,15 @@ with st.sidebar:
             columns=['日期', '星期', '時段', '事前', '事後'],
         )
 
+        # 補上 preset 儲存後才新增的日期（以 AI 操作紀錄判斷狀態）
+        full_df = _make_date_period_df(valid_periods, _load_log(), preset_is_weekend, filter_by_type)
+        existing_keys = set(zip(base_df['日期'], base_df['時段']))
+        new_rows = full_df[
+            ~full_df.apply(lambda r: (r['日期'], r['時段']) in existing_keys, axis=1)
+        ]
+        if not new_rows.empty:
+            base_df = pd.concat([base_df, new_rows], ignore_index=True)
+
         st.session_state['day_type_radio'] = preset['day_type']
         # 同步更新 day_type tracker，避免 rerun 時觸發「切換日期類型→重設時段」的保護邏輯
         st.session_state[f'_day_type_{selected_site}'] = preset['day_type']
