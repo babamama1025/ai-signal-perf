@@ -151,6 +151,85 @@ def _improvement_pct(before: float, after: float, metric: str) -> float:
     return (before - after) / before if metric in LOWER_BETTER else (after - before) / before
 
 
+# ── 特殊總停等延滯 ──────────────────────────────────────────────────────────
+
+def compute_special_raw(
+    df: pd.DataFrame,
+    period: str,
+    before_dates: list,
+    after_dates: list,
+    special_int_cols: list[str],
+    system_vol_col: str,
+) -> dict:
+    """計算特殊路口的總停等延滯加總，以及系統通過量（供後續 format_special_metrics 使用）。"""
+    period_df  = df[df['時段'] == period]
+    before_set = set(pd.Timestamp(d) for d in before_dates)
+    after_set  = set(pd.Timestamp(d) for d in after_dates)
+
+    delay_df = period_df[period_df['指標'] == '總停等延滯']
+    b_rows   = delay_df[delay_df['日期'].isin(before_set)]
+    a_rows   = delay_df[delay_df['日期'].isin(after_set)]
+
+    def _col_sum(rows, cols):
+        vals  = [rows[c].mean() for c in cols if c in rows.columns]
+        valid = [v for v in vals if not pd.isna(v)]
+        return sum(valid) if valid else float('nan')
+
+    vol_df   = period_df[period_df['指標'] == '通過量']
+    b_v_rows = vol_df[vol_df['日期'].isin(before_set)]
+    a_v_rows = vol_df[vol_df['日期'].isin(after_set)]
+
+    return {
+        'special_delay_before': _col_sum(b_rows, special_int_cols),
+        'special_delay_after':  _col_sum(a_rows, special_int_cols),
+        'sys_vol_before': b_v_rows[system_vol_col].mean() if system_vol_col in b_v_rows.columns else float('nan'),
+        'sys_vol_after':  a_v_rows[system_vol_col].mean() if system_vol_col in a_v_rows.columns else float('nan'),
+    }
+
+
+def aggregate_special_raws(all_raws: dict[str, dict], periods: list[str]) -> dict:
+    """將各時段的 special raw 加總，供總表使用。"""
+    b_d = a_d = b_v = a_v = 0.0
+    found = False
+    for p in periods:
+        r = all_raws.get(p, {})
+        if not r or any(pd.isna(r.get(k, float('nan')))
+                        for k in ('special_delay_before', 'special_delay_after',
+                                  'sys_vol_before', 'sys_vol_after')):
+            continue
+        b_d   += r['special_delay_before']
+        a_d   += r['special_delay_after']
+        b_v   += r['sys_vol_before']
+        a_v   += r['sys_vol_after']
+        found  = True
+    nan4 = {k: float('nan') for k in ('special_delay_before', 'special_delay_after',
+                                       'sys_vol_before', 'sys_vol_after')}
+    return nan4 if not found else {
+        'special_delay_before': b_d, 'special_delay_after': a_d,
+        'sys_vol_before': b_v,       'sys_vol_after': a_v,
+    }
+
+
+def format_special_metrics(raw: dict) -> dict[str, dict]:
+    """將 raw 值轉換為 _display_overview_table 可直接使用的 {指標名: {before,after,diff,pct}}。"""
+    b_d = raw.get('special_delay_before', float('nan'))
+    a_d = raw.get('special_delay_after',  float('nan'))
+    b_v = raw.get('sys_vol_before',       float('nan'))
+    a_v = raw.get('sys_vol_after',        float('nan'))
+
+    b_avg = b_d / b_v if _valid_ratio(b_d, b_v) else float('nan')
+    a_avg = a_d / a_v if _valid_ratio(a_d, a_v) else float('nan')
+
+    def _entry(b, a, metric):
+        diff = a - b if not (pd.isna(a) or pd.isna(b)) else float('nan')
+        return {'before': b, 'after': a, 'diff': diff, 'pct': _improvement_pct(b, a, metric)}
+
+    return {
+        '特殊總停等延滯':   _entry(b_d,   a_d,   '總停等延滯'),
+        '特殊平均停等延滯': _entry(b_avg, a_avg, '平均停等延滯'),
+    }
+
+
 def aggregate_periods(
     all_results: dict[str, dict[str, pd.DataFrame]],
     periods: list[str],

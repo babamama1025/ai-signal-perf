@@ -101,9 +101,15 @@ def _highlight_pct_col(col_series, raw_pct: pd.Series):
     return styles
 
 
-def _display_overview_table(results: dict, inc_tt: bool, extra_entities: list[str] | None = None):
+def _display_overview_table(
+    results: dict,
+    inc_tt: bool,
+    extra_entities: list[str] | None = None,
+    special_metrics: dict | None = None,
+):
     """系統層級改善率概覽表格（替代原概覽長條圖）。
     extra_entities：桃園三期等場域需額外顯示的系統層級欄位（如高鐵周邊、A19周邊、前期範圍）。
+    special_metrics：{指標名: {before, after, diff, pct}}，若有則附加到表格末尾。
     """
     base_metrics = ['總停等延滯', '通過量', '平均停等延滯']
     row_labels   = ['事前平均', '事後平均', '差異', '改善(%)']
@@ -137,6 +143,15 @@ def _display_overview_table(results: dict, inc_tt: bool, extra_entities: list[st
                     '差異':     row['差異'],
                     '改善(%)':  row['改善%'],
                 }
+
+    if special_metrics:
+        for metric_name, vals in special_metrics.items():
+            col_raw[metric_name] = {
+                '事前平均': vals['before'],
+                '事後平均': vals['after'],
+                '差異':     vals['diff'],
+                '改善(%)':  vals['pct'],
+            }
 
     if not col_raw:
         st.warning('無概覽資料')
@@ -792,6 +807,17 @@ with st.sidebar:
     st.subheader('⚙️ 選項')
     include_tt  = st.checkbox('包含旅行時間', value=True)
     show_detail = st.checkbox('顯示各路口各方向明細', value=True)
+    use_special = st.checkbox('計算特殊總停等延滯', value=False)
+    special_int_cols: list[str] = []
+    if use_special:
+        col_groups   = dl.get_column_groups()
+        int_options  = [k for k in col_groups if k not in ('系統總量', '旅行時間廊道')]
+        special_int_cols = st.multiselect(
+            '選擇納入計算的路口',
+            options=int_options,
+            key=f'special_int_cols_{selected_site}',
+            placeholder='請選擇路口…',
+        )
 
     if st.button('🔍 診斷 GitHub 連線', key='diag_github'):
         cfg    = st.secrets.get('github', {})
@@ -829,12 +855,22 @@ with st.sidebar:
                     df, period, before_by_period[period], after_by_period[period],
                     compare_cols, include_travel_time=include_tt,
                 )
+            special_raws: dict[str, dict] = {}
+            if use_special and special_int_cols:
+                sys_cols_list = dl.get_system_columns()
+                sys_vol_col   = sys_cols_list[0] if sys_cols_list else ''
+                for period in selected_periods:
+                    special_raws[period] = cl.compute_special_raw(
+                        df, period, before_by_period[period], after_by_period[period],
+                        special_int_cols, sys_vol_col,
+                    )
             st.session_state['analysis_results'] = {
                 'results':          all_results,
                 'before_by_period': before_by_period,
                 'after_by_period':  after_by_period,
                 'periods':          selected_periods,
                 'include_tt':       include_tt,
+                'special_raws':     special_raws,
             }
         st.success('分析完成！')
 
@@ -909,6 +945,7 @@ bd_by_period    = saved['before_by_period']
 ad_by_period    = saved['after_by_period']
 periods         = saved['periods']
 inc_tt          = saved['include_tt']
+special_raws    = saved.get('special_raws', {})
 
 # ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
 summary_rows = [
@@ -920,8 +957,10 @@ st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=Tr
 # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
 st.subheader('📊 系統層級改善率概覽')
 st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
-overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
-_display_overview_table(overview_all, inc_tt, extra_entities)
+overview_all    = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
+agg_special_raw = cl.aggregate_special_raws(special_raws, periods) if special_raws else None
+agg_special     = cl.format_special_metrics(agg_special_raw) if agg_special_raw else None
+_display_overview_table(overview_all, inc_tt, extra_entities, agg_special)
 
 st.divider()
 
@@ -930,7 +969,8 @@ st.subheader('📊 各時段系統層級改善率概覽')
 for period, results in all_results.items():
     if len(all_results) > 1:
         st.markdown(f"**⏱ {period}**")
-    _display_overview_table(results, inc_tt, extra_entities)
+    period_special = cl.format_special_metrics(special_raws[period]) if special_raws.get(period) else None
+    _display_overview_table(results, inc_tt, extra_entities, period_special)
 
 # ── 分析摘要 ──────────────────────────────────────────────────────────────────
 with st.expander('📝 分析摘要（展開）', expanded=True):
