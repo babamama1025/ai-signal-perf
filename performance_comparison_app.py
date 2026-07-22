@@ -25,6 +25,9 @@ SITE_OPTIONS = {
     '桃園三期(高鐵)': 'perf_summary_3.csv',
 }
 
+# 桃園三期額外需要納入概覽與總表的系統層級欄位
+SITE3_EXTRA_ENTITIES = ['高鐵周邊', 'A19周邊', '前期範圍']
+
 # ── 場域預設時段（平日 / 假日）─────────────────────────────────────────────
 # 修改此區塊可調整各場域的預設勾選時段
 SITE_DEFAULTS = {
@@ -104,24 +107,31 @@ def _highlight_pct_col(col_series, raw_pct: pd.Series):
     return styles
 
 
-def _display_overview_table(results: dict, inc_tt: bool):
-    """系統層級改善率概覽表格（替代原概覽長條圖）。"""
+def _display_overview_table(results: dict, inc_tt: bool, extra_entities: list[str] | None = None):
+    """系統層級改善率概覽表格（替代原概覽長條圖）。
+    extra_entities：桃園三期等場域需額外顯示的系統層級欄位（如高鐵周邊、A19周邊、前期範圍）。
+    """
     base_metrics = ['總停等延滯', '通過量', '平均停等延滯']
     row_labels   = ['事前平均', '事後平均', '差異', '改善(%)']
 
+    all_entities = ['系統'] + (list(extra_entities) if extra_entities else [])
+    multi_entity = len(all_entities) > 1
+
     col_raw: dict[str, dict] = {}
 
-    for metric in base_metrics:
-        mdf = results.get(metric, pd.DataFrame())
-        if not mdf.empty:
-            sys_row = mdf[mdf['欄位'] == '系統']
-            if not sys_row.empty:
-                col_raw[metric] = {
-                    '事前平均': sys_row['事前平均'].values[0],
-                    '事後平均': sys_row['事後平均'].values[0],
-                    '差異':     sys_row['差異'].values[0],
-                    '改善(%)':  sys_row['改善%'].values[0],
-                }
+    for entity in all_entities:
+        for metric in base_metrics:
+            mdf = results.get(metric, pd.DataFrame())
+            if not mdf.empty:
+                e_row = mdf[mdf['欄位'] == entity]
+                if not e_row.empty:
+                    col_key = f"{entity}_{metric}" if multi_entity else metric
+                    col_raw[col_key] = {
+                        '事前平均': e_row['事前平均'].values[0],
+                        '事後平均': e_row['事後平均'].values[0],
+                        '差異':     e_row['差異'].values[0],
+                        '改善(%)':  e_row['改善%'].values[0],
+                    }
 
     if inc_tt:
         tt_df = results.get('旅行時間', pd.DataFrame())
@@ -142,7 +152,7 @@ def _display_overview_table(results: dict, inc_tt: bool):
     raw_imp: dict[str, float]     = {}
 
     for col_name, vals in col_raw.items():
-        is_vol = (col_name == '通過量')
+        is_vol = col_name == '通過量' or (multi_entity and col_name.endswith('_通過量'))
         def _fmt(v, vol=is_vol):
             return '—' if pd.isna(v) else (f"{v:,.0f}" if vol else f"{v:,.1f}")
         display_data[col_name] = [
@@ -368,6 +378,30 @@ def _load_df(csv_path: str, _mtime: float):
     return df, dict(dl.get_column_structure())
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_file_last_commit_date(rel_path: str) -> str | None:
+    """透過 GitHub API 查詢檔案最後一次 commit 的日期（YYYY/MM/DD）。"""
+    try:
+        cfg    = st.secrets.get('github', {})
+        token  = cfg.get('token', '')
+        repo   = cfg.get('repo', '')
+        branch = cfg.get('branch', 'main')
+        if not token or not repo:
+            return None
+        r = requests.get(
+            f'https://api.github.com/repos/{repo}/commits',
+            headers={'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'},
+            params={'path': rel_path, 'sha': branch, 'per_page': 1},
+            timeout=10,
+        )
+        if not r.ok or not r.json():
+            return None
+        iso = r.json()[0]['commit']['committer']['date']   # e.g. "2026-07-21T12:34:56Z"
+        return iso[:10].replace('-', '/')
+    except Exception:
+        return None
+
+
 # ── 時序數據分析輔助函式 ──────────────────────────────────────────────────────
 def _render_flow_trend(df_perf: pd.DataFrame) -> None:
     """多日流量趨勢分析（從 perf_summary）。"""
@@ -548,21 +582,26 @@ if not CSV_PATH.exists():
 df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
 dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
 
-all_dates   = dl.get_available_dates(df)
-all_periods = dl.get_available_periods(df)
-system_cols = dl.get_system_columns()
+all_dates      = dl.get_available_dates(df)
+all_periods    = dl.get_available_periods(df)
+system_cols    = dl.get_system_columns()
+extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)' else []
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
-def _make_date_period_df(periods: list[str], log_df: pd.DataFrame) -> pd.DataFrame:
+def _make_date_period_df(periods: list[str], log_df: pd.DataFrame,
+                          is_weekend: bool = False, filter_by_type: bool = True) -> pd.DataFrame:
     """
     建立「日期 × 時段」分配表（長格式，每列為一個日期＋時段組合）。
     狀態完全依 AI 操作紀錄判斷：啟動 → 事後；關閉或無紀錄 → 事前
     （無操作紀錄視為預設開啟定時時制 TOD）。
+    filter_by_type：True 時依 is_weekend 過濾日期；False 時顯示全部日期。
     """
     status_map = _period_status_map(log_df, periods)
     rows = []
     for d in all_dates:
+        if filter_by_type and (d.weekday() >= 5) != is_weekend:
+            continue
         d_str = d.strftime('%Y/%m/%d')
         for p in periods:
             status = status_map.get((d_str, p), '關閉')
@@ -588,9 +627,10 @@ with st.sidebar:
         f'資料範圍：{all_dates[0].strftime("%Y/%m/%d")} ～ '
         f'{all_dates[-1].strftime("%Y/%m/%d")}（共 {len(all_dates)} 天）'
     )
-    st.caption(
-        f'資料更新：{datetime.fromtimestamp(CSV_PATH.stat().st_mtime).strftime("%Y/%m/%d")}'
-    )
+    _csv_rel = CSV_PATH.relative_to(BASE_DIR).as_posix()
+    _commit_date = _get_file_last_commit_date(_csv_rel)
+    _update_str = _commit_date or datetime.fromtimestamp(CSV_PATH.stat().st_mtime).strftime('%Y/%m/%d')
+    st.caption(f'資料更新：{_update_str}')
     st.divider()
 
     # ── 日期類型（平日 / 假日）────────────────────────────────────────────
@@ -628,11 +668,16 @@ with st.sidebar:
         key=periods_widget_key,   # 切換場域或日期類型時自動重置
     )
 
+    # 日期類型過濾 checkbox 在後方才渲染，先從 session state 讀取上一次的值
+    _filter_by_day_type = st.session_state.get('filter_by_day_type', True)
+
     # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
-    periods_key = (selected_site, day_type, tuple(sorted(selected_periods)))
+    periods_key = (selected_site, day_type, tuple(sorted(selected_periods)), _filter_by_day_type)
     if st.session_state.get('_periods_key') != periods_key:
         st.session_state['_periods_key'] = periods_key
-        st.session_state['date_df'] = _make_date_period_df(selected_periods, _load_log())
+        st.session_state['date_df'] = _make_date_period_df(
+            selected_periods, _load_log(), is_weekend, _filter_by_day_type,
+        )
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     st.divider()
@@ -694,6 +739,42 @@ with st.sidebar:
         st.session_state['date_df'] = cleared_df
         st.session_state['editor_ver'] += 1
         st.rerun()
+
+    st.checkbox(
+        '只顯示符合日期類型的日期',
+        value=True,
+        key='filter_by_day_type',
+        help='取消勾選可同時顯示平常日與週末，適合跨類型比較分析',
+    )
+
+    # ── 批次勾選／取消（一次多選日期）──────────────────────────────────
+    st.caption('批次操作：多選日期後，一次套用到該幾天的所有時段列。')
+    batch_dates = st.multiselect(
+        '選擇日期（可多選）',
+        options=list(dict.fromkeys(st.session_state['date_df']['日期'])),
+        key='batch_select_dates',
+        label_visibility='collapsed',
+        placeholder='選擇要批次操作的日期',
+    )
+    bcol1, bcol2, bcol3 = st.columns(3)
+
+    def _apply_batch(set_before: bool | None, set_after: bool | None):
+        new_df = st.session_state['date_df'].copy()
+        mask = new_df['日期'].isin(batch_dates)
+        if set_before is not None:
+            new_df.loc[mask, '事前'] = set_before
+        if set_after is not None:
+            new_df.loc[mask, '事後'] = set_after
+        st.session_state['date_df'] = new_df
+        st.session_state['editor_ver'] += 1
+        st.rerun()
+
+    if bcol1.button('✅ 設為事前', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(True, False)
+    if bcol2.button('✅ 設為事後', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(False, True)
+    if bcol3.button('✖ 取消勾選', use_container_width=True, disabled=not batch_dates):
+        _apply_batch(False, False)
 
     edited_df = st.data_editor(
         st.session_state['date_df'],
@@ -767,8 +848,11 @@ with st.sidebar:
         if preset is None:
             return
         valid_periods = [p for p in preset['periods'] if p in all_periods]
+        preset_is_weekend = preset['day_type'] == '週末（六、日）'
+        filter_by_type = st.session_state.get('filter_by_day_type', True)
 
         # 直接從儲存的 rows 重建，只保留儲存當時的日期範圍
+        # filter_by_type 開啟時過濾不符日期類型的列
         base_df = pd.DataFrame(
             [
                 {
@@ -780,14 +864,27 @@ with st.sidebar:
                 }
                 for r in preset['rows']
                 if r['時段'] in valid_periods
+                and (not filter_by_type
+                     or (pd.Timestamp(r['日期']).weekday() >= 5) == preset_is_weekend)
             ],
             columns=['日期', '星期', '時段', '事前', '事後'],
         )
 
+        # 補上 preset 儲存後才新增的日期（以 AI 操作紀錄判斷狀態）
+        full_df = _make_date_period_df(valid_periods, _load_log(), preset_is_weekend, filter_by_type)
+        existing_keys = set(zip(base_df['日期'], base_df['時段']))
+        new_rows = full_df[
+            ~full_df.apply(lambda r: (r['日期'], r['時段']) in existing_keys, axis=1)
+        ]
+        if not new_rows.empty:
+            base_df = pd.concat([base_df, new_rows], ignore_index=True)
+
         st.session_state['day_type_radio'] = preset['day_type']
+        # 同步更新 day_type tracker，避免 rerun 時觸發「切換日期類型→重設時段」的保護邏輯
+        st.session_state[f'_day_type_{selected_site}'] = preset['day_type']
         periods_widget_key = f"periods_{selected_site}_{preset['day_type']}"
         st.session_state[periods_widget_key] = valid_periods
-        st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)))
+        st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)), filter_by_type)
         st.session_state['date_df'] = base_df
         st.session_state['_save_load_msg'] = (
             f'✅ 已載入「{preset["name"]}」'
@@ -988,8 +1085,8 @@ with _tab_ba:
         # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
         st.subheader('📊 系統層級改善率概覽')
         st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
-        overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt)
-        _display_overview_table(overview_all, inc_tt)
+        overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
+        _display_overview_table(overview_all, inc_tt, extra_entities)
 
         st.divider()
 
@@ -998,7 +1095,7 @@ with _tab_ba:
         for period, results in all_results.items():
             if len(all_results) > 1:
                 st.markdown(f"**⏱ {period}**")
-            _display_overview_table(results, inc_tt)
+            _display_overview_table(results, inc_tt, extra_entities)
 
         # ── 分析摘要 ──────────────────────────────────────────────────────────────────
         with st.expander('📝 分析摘要（展開）', expanded=True):
@@ -1014,7 +1111,7 @@ with _tab_ba:
         for i, period in enumerate(periods):
             results = all_results.get(period, {})
             with tab_containers[i]:
-                for metric in ['總停等延滯', '通過量', '平均停等延滯']:
+                for metric in ['平均停等延滯', '總停等延滯', '通過量']:
                     comp_df = results.get(metric, pd.DataFrame())
                     st.subheader(f'📊 {metric}')
                     if comp_df.empty:
@@ -1062,6 +1159,7 @@ with _tab_ba:
                     include_travel_time=inc_tt,
                     raw_df=df if include_raw else None,
                     raw_periods=periods if include_raw else None,
+                    extra_summary_entities=extra_entities,
                 )
             ts = datetime.now().strftime('%Y%m%d_%H%M')
             st.download_button(
