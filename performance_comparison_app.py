@@ -133,6 +133,15 @@ def _display_overview_table(
                         '改善(%)':  e_row['改善%'].values[0],
                     }
 
+    if special_metrics:
+        for metric_name, vals in special_metrics.items():
+            col_raw[metric_name] = {
+                '事前平均': vals['before'],
+                '事後平均': vals['after'],
+                '差異':     vals['diff'],
+                '改善(%)':  vals['pct'],
+            }
+
     if inc_tt:
         tt_df = results.get('旅行時間', pd.DataFrame())
         if not tt_df.empty:
@@ -143,15 +152,6 @@ def _display_overview_table(
                     '差異':     row['差異'],
                     '改善(%)':  row['改善%'],
                 }
-
-    if special_metrics:
-        for metric_name, vals in special_metrics.items():
-            col_raw[metric_name] = {
-                '事前平均': vals['before'],
-                '事後平均': vals['after'],
-                '差異':     vals['diff'],
-                '改善(%)':  vals['pct'],
-            }
 
     if not col_raw:
         st.warning('無概覽資料')
