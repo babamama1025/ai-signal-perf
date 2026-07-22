@@ -37,7 +37,8 @@ def build_comparison_xlsx(
 
     _build_info_sheet(wb, before_by_period, after_by_period)
     _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
-                         extra_summary_entities=extra_summary_entities)
+                         extra_summary_entities=extra_summary_entities,
+                         include_travel_time=include_travel_time)
     for period, results in all_results.items():
         _build_period_sheet(
             wb, period, results,
@@ -97,13 +98,14 @@ def _build_info_sheet(wb, before_by_period, after_by_period):
 
 
 def _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
-                          extra_summary_entities: list[str] | None = None):
+                          extra_summary_entities: list[str] | None = None,
+                          include_travel_time: bool = True):
     ws = wb.create_sheet('總表')
     periods = list(all_results.keys())
     extra_entities = list(extra_summary_entities) if extra_summary_entities else []
 
-    # 「全時段合計」：總停等延滯／通過量加總、平均停等延滯由加總重新推導（不含旅行時間）
-    aggregated = aggregate_periods(all_results, periods, include_travel_time=False,
+    # 「全時段合計」：總停等延滯／通過量加總、平均停等延滯由加總重新推導
+    aggregated = aggregate_periods(all_results, periods, include_travel_time=include_travel_time,
                                    extra_entities=extra_entities or None)
     n_before_all = sum(len(before_by_period.get(p, [])) for p in periods)
     n_after_all  = sum(len(after_by_period.get(p, [])) for p in periods)
@@ -175,13 +177,47 @@ def _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
                     _write_pct(ws.cell(row, c + 3), pct)
             row += 1
 
+    # 旅行時間各廊道（全時段用各時段平均）
+    if include_travel_time:
+        corridor_order: list[str] = []
+        seen_corridors: set[str] = set()
+        for _, results_dict, _, _ in col_blocks:
+            tdf = results_dict.get('旅行時間', pd.DataFrame())
+            if not tdf.empty:
+                for corridor in tdf['欄位']:
+                    if corridor not in seen_corridors:
+                        seen_corridors.add(corridor)
+                        corridor_order.append(corridor)
+        if corridor_order:
+            ws.cell(row, 1, '旅行時間').font = FONT_WHITE_BOLD
+            ws.cell(row, 1).fill = FILL_HEADER
+            row += 1
+            for corridor in corridor_order:
+                ws.cell(row, 1, f'  {corridor}').font = FONT_NORMAL
+                ws.cell(row, 1).fill = FILL_SUBHEADER
+                for i, (_, results_dict, _, _) in enumerate(col_blocks):
+                    c = col_start + i * 4
+                    tdf = results_dict.get('旅行時間', pd.DataFrame())
+                    r = tdf[tdf['欄位'] == corridor] if not tdf.empty else pd.DataFrame()
+                    if not r.empty:
+                        b, a = r['事前平均'].values[0], r['事後平均'].values[0]
+                        diff, pct = r['差異'].values[0], r['改善%'].values[0]
+                        ws.cell(row, c, b if not pd.isna(b) else None)
+                        ws.cell(row, c + 1, a if not pd.isna(a) else None)
+                        ws.cell(row, c + 2, diff if not pd.isna(diff) else None)
+                        _apply_num_format(ws.cell(row, c), '旅行時間')
+                        _apply_num_format(ws.cell(row, c + 1), '旅行時間')
+                        _apply_num_format(ws.cell(row, c + 2), '旅行時間')
+                        _write_pct(ws.cell(row, c + 3), pct)
+                row += 1
+
     # 欄寬
     ws.column_dimensions['A'].width = 18
     for col in range(2, 2 + len(col_blocks) * 4):
         ws.column_dimensions[get_column_letter(col)].width = 13
 
-    # 說明（各時段事前／事後天數已列於欄標題）
-    ws.cell(row + 1, 1, '「全時段合計」為所有時段加總（旅行時間類指標除外）；各時段事前／事後天數詳見欄標題；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
+    # 說明
+    ws.cell(row + 1, 1, '「全時段合計」總停等延滯／通過量為各時段加總，平均停等延滯由加總重新推導，旅行時間為各時段平均；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
 
 
 def _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time):
@@ -368,6 +404,5 @@ def _write_num(cell, val, metric: str):
 
 
 def _apply_num_format(cell, metric: str):
-    # LOWER_BETTER 指標為小數格式；非 LOWER_BETTER（通過量類）為整數格式
-    cell.number_format = '#,##0' if metric not in LOWER_BETTER else '#,##0.0'
+    cell.number_format = '0'
     cell.font = FONT_NORMAL
