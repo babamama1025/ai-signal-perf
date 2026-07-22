@@ -689,7 +689,7 @@ with st.sidebar:
         st.session_state[f'_day_type_{selected_site}'] = preset['day_type']
         periods_widget_key = f"periods_{selected_site}_{preset['day_type']}"
         st.session_state[periods_widget_key] = valid_periods
-        st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)))
+        st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)), filter_by_type)
         st.session_state['date_df'] = base_df
         st.session_state['_save_load_msg'] = (
             f'✅ 已載入「{preset["name"]}」'
@@ -912,7 +912,7 @@ tab_containers = st.tabs(periods) if len(periods) > 1 else [st.container()]
 for i, period in enumerate(periods):
     results = all_results.get(period, {})
     with tab_containers[i]:
-        for metric in ['總停等延滯', '通過量', '平均停等延滯']:
+        for metric in ['平均停等延滯', '總停等延滯', '通過量']:
             comp_df = results.get(metric, pd.DataFrame())
             st.subheader(f'📊 {metric}')
             if comp_df.empty:
