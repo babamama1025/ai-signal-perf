@@ -372,6 +372,30 @@ def _load_df(csv_path: str, _mtime: float):
     return df, dict(dl.get_column_structure())
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_file_last_commit_date(rel_path: str) -> str | None:
+    """透過 GitHub API 查詢檔案最後一次 commit 的日期（YYYY/MM/DD）。"""
+    try:
+        cfg    = st.secrets.get('github', {})
+        token  = cfg.get('token', '')
+        repo   = cfg.get('repo', '')
+        branch = cfg.get('branch', 'main')
+        if not token or not repo:
+            return None
+        r = requests.get(
+            f'https://api.github.com/repos/{repo}/commits',
+            headers={'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'},
+            params={'path': rel_path, 'sha': branch, 'per_page': 1},
+            timeout=10,
+        )
+        if not r.ok or not r.json():
+            return None
+        iso = r.json()[0]['commit']['committer']['date']   # e.g. "2026-07-21T12:34:56Z"
+        return iso[:10].replace('-', '/')
+    except Exception:
+        return None
+
+
 # ── 場域選擇（側邊欄最頂部，資料載入前先取得選擇）──────────────────────────
 st.sidebar.title('🚦 分析設定')
 st.sidebar.subheader('🗺️ 場域選擇')
@@ -442,9 +466,10 @@ with st.sidebar:
         f'資料範圍：{all_dates[0].strftime("%Y/%m/%d")} ～ '
         f'{all_dates[-1].strftime("%Y/%m/%d")}（共 {len(all_dates)} 天）'
     )
-    st.caption(
-        f'資料更新：{datetime.fromtimestamp(CSV_PATH.stat().st_mtime).strftime("%Y/%m/%d")}'
-    )
+    _csv_rel = CSV_PATH.relative_to(BASE_DIR).as_posix()
+    _commit_date = _get_file_last_commit_date(_csv_rel)
+    _update_str = _commit_date or datetime.fromtimestamp(CSV_PATH.stat().st_mtime).strftime('%Y/%m/%d')
+    st.caption(f'資料更新：{_update_str}')
     st.divider()
 
     # ── 日期類型（平日 / 假日）────────────────────────────────────────────
