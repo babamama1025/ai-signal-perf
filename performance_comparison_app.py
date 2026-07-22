@@ -669,6 +669,8 @@ with st.sidebar:
         )
 
         st.session_state['day_type_radio'] = preset['day_type']
+        # 同步更新 day_type tracker，避免 rerun 時觸發「切換日期類型→重設時段」的保護邏輯
+        st.session_state[f'_day_type_{selected_site}'] = preset['day_type']
         periods_widget_key = f"periods_{selected_site}_{preset['day_type']}"
         st.session_state[periods_widget_key] = valid_periods
         st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)))
