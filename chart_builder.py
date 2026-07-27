@@ -13,10 +13,9 @@ def make_metric_bar_chart(
     comparison_df: pd.DataFrame,
     metric_name: str,
     period: str,
-    top_n: int = 20,
 ) -> go.Figure:
-    """事前 vs 事後群組長條圖（取前 top_n 欄）。"""
-    df = comparison_df.dropna(subset=['事前平均', '事後平均']).head(top_n)
+    """事前 vs 事後群組長條圖。"""
+    df = comparison_df.dropna(subset=['事前平均', '事後平均'])
     if df.empty:
         return _empty_fig(f"無資料：{period} {metric_name}")
 
