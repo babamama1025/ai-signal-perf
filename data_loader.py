@@ -17,7 +17,7 @@ _APPROACH_RE = re.compile(r'^[A-Z](\.\d+)?$')
 # 旅行時間廊道欄的識別規則：
 #   四期格式：欄名含「路徑」或「->」
 #   三期格式：欄名含破折號「-」，但不是路口編號範圍（如「4-5 台31/...」開頭的格式）
-_TT_RE = re.compile(r'路徑|->')
+_TT_RE = re.compile(r'路徑|->|旅行時間')
 
 # 模組層級快取：load_performance_csv 載入後自動填入
 _col_structure: dict | None = None
