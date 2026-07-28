@@ -444,27 +444,32 @@ extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)'
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
 def _make_date_period_df(periods: list[str], log_df: pd.DataFrame,
-                          is_weekend: bool = False, filter_by_type: bool = True) -> pd.DataFrame:
+                          is_weekend: bool = False, filter_by_type: bool = True,
+                          auto_classify: bool = False) -> pd.DataFrame:
     """
     建立「日期 × 時段」分配表（長格式，每列為一個日期＋時段組合）。
-    狀態完全依 AI 操作紀錄判斷：啟動 → 事後；關閉或無紀錄 → 事前
-    （無操作紀錄視為預設開啟定時時制 TOD）。
+    auto_classify=True：依 AI 操作紀錄判斷事前/事後（啟動→事後；關閉或無紀錄→事前）。
+    auto_classify=False（預設）：事前/事後均為 False，由使用者手動勾選。
     filter_by_type：True 時依 is_weekend 過濾日期；False 時顯示全部日期。
     """
-    status_map = _period_status_map(log_df, periods)
+    status_map = _period_status_map(log_df, periods) if auto_classify else {}
     rows = []
     for d in all_dates:
         if filter_by_type and (d.weekday() >= 5) != is_weekend:
             continue
         d_str = d.strftime('%Y/%m/%d')
         for p in periods:
-            status = status_map.get((d_str, p), '關閉')
+            if auto_classify:
+                status = status_map.get((d_str, p), '關閉')
+                before, after = status == '關閉', status == '啟動'
+            else:
+                before, after = False, False
             rows.append({
                 '日期': d_str,
                 '星期': dl.TW_WEEKDAY[d.weekday()],
                 '時段': p,
-                '事前': status == '關閉',
-                '事後': status == '啟動',
+                '事前': before,
+                '事後': after,
             })
     return pd.DataFrame(rows, columns=['日期', '星期', '時段', '事前', '事後'])
 
@@ -528,10 +533,53 @@ with st.sidebar:
     # 時段選擇改變時，依 AI 操作紀錄重新建立日期×時段分配表
     periods_key = (selected_site, day_type, tuple(sorted(selected_periods)), _filter_by_day_type)
     if st.session_state.get('_periods_key') != periods_key:
+        old_key = st.session_state.get('_periods_key')
         st.session_state['_periods_key'] = periods_key
-        st.session_state['date_df'] = _make_date_period_df(
-            selected_periods, _load_log(), is_weekend, _filter_by_day_type,
+        # 場域或日期類型改變 → 全部重建（空白）
+        # 時段增減或篩選 checkbox 改變 → 差異更新，保留既有勾選狀態
+        can_update_incrementally = (
+            old_key is not None
+            and old_key[0] == selected_site
+            and old_key[1] == day_type
+            and 'date_df' in st.session_state
         )
+        if can_update_incrementally:
+            existing_df     = st.session_state['date_df'].copy()
+            old_periods_set = set(old_key[2])
+            new_periods_set = set(selected_periods)
+            added_periods   = new_periods_set - old_periods_set
+            removed_periods = old_periods_set - new_periods_set
+            if removed_periods:
+                existing_df = existing_df[~existing_df['時段'].isin(removed_periods)].reset_index(drop=True)
+            if added_periods:
+                new_rows_df = _make_date_period_df(
+                    list(added_periods), _load_log(), is_weekend, _filter_by_day_type,
+                )
+                existing_df = pd.concat([existing_df, new_rows_df], ignore_index=True)
+            # 篩選 checkbox 改變：補入或移除對應日期列，保留既有勾選
+            if old_key[3] != _filter_by_day_type:
+                if _filter_by_day_type:
+                    # 重新啟用過濾：移除不符合日期類型的列
+                    existing_df = existing_df[
+                        existing_df['日期'].apply(lambda d: (pd.Timestamp(d).weekday() >= 5) == is_weekend)
+                    ].reset_index(drop=True)
+                else:
+                    # 取消過濾：補入原本隱藏的日期（空白）
+                    shown_keys  = set(zip(existing_df['日期'], existing_df['時段']))
+                    all_rows_df = _make_date_period_df(
+                        list(new_periods_set), _load_log(), is_weekend, filter_by_type=False,
+                    )
+                    hidden_rows = all_rows_df[
+                        ~all_rows_df.apply(lambda r: (r['日期'], r['時段']) in shown_keys, axis=1)
+                    ]
+                    if not hidden_rows.empty:
+                        existing_df = pd.concat([existing_df, hidden_rows], ignore_index=True)
+            st.session_state['date_df'] = existing_df
+        else:
+            # 初次載入、切換場域、切換日期類型 → 全部重建，預設全空白
+            st.session_state['date_df'] = _make_date_period_df(
+                selected_periods, _load_log(), is_weekend, _filter_by_day_type,
+            )
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     st.divider()
@@ -724,12 +772,13 @@ with st.sidebar:
             columns=['日期', '星期', '時段', '事前', '事後'],
         )
 
-        # 補上 preset 儲存後才新增的日期（以 AI 操作紀錄判斷狀態）
+        # 補上 preset 儲存後才新增的日期（空白，不自動勾選）
         full_df = _make_date_period_df(valid_periods, _load_log(), preset_is_weekend, filter_by_type)
-        existing_keys = set(zip(base_df['日期'], base_df['時段']))
-        new_rows = full_df[
+        existing_keys  = set(zip(base_df['日期'], base_df['時段']))
+        new_rows       = full_df[
             ~full_df.apply(lambda r: (r['日期'], r['時段']) in existing_keys, axis=1)
         ]
+        new_date_count = new_rows['日期'].nunique() if not new_rows.empty else 0
         if not new_rows.empty:
             base_df = pd.concat([base_df, new_rows], ignore_index=True)
 
@@ -740,10 +789,10 @@ with st.sidebar:
         st.session_state[periods_widget_key] = valid_periods
         st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)), filter_by_type)
         st.session_state['date_df'] = base_df
-        st.session_state['_save_load_msg'] = (
-            f'✅ 已載入「{preset["name"]}」'
-            f'（{preset["day_type"]}，儲存於 {preset["saved_at"]}）'
-        )
+        load_msg = f'✅ 已載入「{preset["name"]}」（{preset["day_type"]}，儲存於 {preset["saved_at"]}）'
+        if new_date_count > 0:
+            load_msg += f'；已補入 {new_date_count} 筆新日期（未勾選，可用「⚡ 依操作紀錄自動填入」補全）'
+        st.session_state['_save_load_msg'] = load_msg
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
     if saved_selections:
