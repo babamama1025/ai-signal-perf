@@ -58,13 +58,74 @@ SELECTION_PATHS = {
     '桃園三期(高鐵)': 'date_selections_3.json',
 }
 
+# ── 旅行時間指標說明（popover 用）────────────────────────────────────────────
+_TT_METRIC_INFO_MD = """
+#### 一、路徑加權平均旅行時間
+
+以 ETAG 偵測到的**實際車輛數**作為可信度權重，將四條路徑在分析時段內每一分鐘的旅行時間彙整為單一代表值。
+
+對分析時段內每一分鐘 $t$、每一條路徑 $p$：
+
+$$w(p,t) = \\min_{s \\in p}[\\text{datanum}(s,t)]$$
+
+取路徑內所有路段在該分鐘原始車輛偵測數的最小值作為路徑權重：
+
+$$\\text{路徑加權平均旅行時間} = \\frac{\\sum_{p}\\sum_{t} \\text{TT}(p,t) \\times w(p,t)}{\\sum_{p}\\sum_{t} w(p,t)}$$
+
+> 任一路段無資料（datanum = 0）則整條路徑該分鐘不納入計算。
+
+---
+
+#### 二、場域各路段加權平均旅行時間
+
+以場域內**全部 ETAG 路段**的原始偵測資料，計算整個分析時段的場域整體旅行時間代表值。
+
+使用原始資料（未做離群值排除、未套用時間視窗平滑），僅保留 datanum > 0 的有效紀錄：
+
+$$\\text{場域各路段加權平均旅行時間} = \\frac{\\sum_{s}\\sum_{t} \\text{TT}_{\\text{raw}}(s,t) \\times \\text{datanum}(s,t)}{\\sum_{s}\\sum_{t} \\text{datanum}(s,t)}$$
+
+> 跨路段、跨分鐘統一加權，反映整個場域所有偵測車輛的整體平均行駛效率，不受特定路徑定義影響。
+
+---
+
+#### 三、路徑加權路段通過量平均旅行時間
+
+以各路徑代表路段的**實際交通量**作為路徑重要性的衡量依據，計算四條路徑平均旅行時間的加權平均值。
+
+| 路徑 | 代表路段 | 方向 | 車道 |
+|------|----------|------|------|
+| 路徑1 | S406400 | 東向（dir 6） | 全部 |
+| 路徑2 | S406400 | 南向（dir 2） | 3、4（直行） |
+| 路徑3 | S406400 | 西向（dir 4） | 全部 |
+| 路徑4 | S406400 | 南向（dir 2） | 1、2（左轉） |
+
+以 $\\overline{\\text{TT}}_p$ 為路徑 $p$ 的平均旅行時間，$V_p$ 為代表路段時段總通過量（大車＋小車）：
+
+$$\\text{路徑加權路段通過量平均旅行時間} = \\frac{\\sum_{p} \\overline{\\text{TT}}_p \\times V_p}{\\sum_{p} V_p}$$
+
+> 通過量越大的路徑給予更高權重，使指標能反映主要車流方向的實際旅行效率。
+
+---
+
+| 指標 | 時間粒度 | 空間範圍 | 權重來源 |
+|------|----------|----------|----------|
+| 路徑加權平均旅行時間 | 逐分鐘 × 全路徑 | 各路徑所有路段 | ETAG 每分鐘偵測數（路徑最小值） |
+| 場域各路段加權平均旅行時間 | 逐分鐘 × 全路段 | 場域所有 ETAG 路段 | ETAG 每分鐘偵測數（原始） |
+| 路徑加權路段通過量平均旅行時間 | 時段平均 × 全路徑 | 各路徑代表路段 | VD 時段累計車流量（大＋小車） |
+"""
+
+
+@st.dialog('旅行時間加權計算方式', width='large')
+def _show_tt_info_dialog():
+    st.markdown(_TT_METRIC_INFO_MD)
+
+
 # ── 頁面設定 ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title='AI 號誌事前後分析系統',
     page_icon='🚦',
     layout='wide',
 )
-
 # ── 表格格式化輔助函式 ────────────────────────────────────────────────────────
 def _format_comp_df(comp_df: pd.DataFrame, metric: str):
     """回傳（格式化後 DataFrame, 原始 改善% Series）供樣式使用。"""
@@ -1005,7 +1066,12 @@ st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=Tr
 
 # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
 st.subheader('📊 系統層級改善率概覽')
-st.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
+_cap_col, _info_col = st.columns([10, 1])
+_cap_col.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
+if inc_tt:
+    with _info_col:
+        if st.button('ℹ️', help='旅行時間加權計算方式', key='tt_info_btn'):
+            _show_tt_info_dialog()
 overview_all    = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
 agg_special_raw = cl.aggregate_special_raws(special_raws, periods) if special_raws else None
 agg_special     = cl.format_special_metrics(agg_special_raw) if agg_special_raw else None
