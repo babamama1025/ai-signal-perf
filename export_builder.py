@@ -21,7 +21,7 @@ FONT_RED = Font(name='微軟正黑體', color='9C0006')
 FONT_NORMAL = Font(name='微軟正黑體')
 
 # 服務水準 (LOS) — 台灣公路容量手冊：號誌化路口平均停等延滯對應值
-_LOS_THRESHOLDS = [(10, 'A'), (20, 'B'), (35, 'C'), (55, 'D'), (80, 'E')]
+_LOS_THRESHOLDS = [(15, 'A'), (30, 'B'), (45, 'C'), (60, 'D'), (80, 'E')]
 
 _LOS_FILL = {
     'A': PatternFill('solid', fgColor='00B050'),
