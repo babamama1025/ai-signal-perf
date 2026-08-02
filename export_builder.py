@@ -20,6 +20,27 @@ FONT_GREEN = Font(name='微軟正黑體', color='375623')
 FONT_RED = Font(name='微軟正黑體', color='9C0006')
 FONT_NORMAL = Font(name='微軟正黑體')
 
+# 服務水準 (LOS) — 台灣公路容量手冊：號誌化路口平均停等延滯對應值
+_LOS_THRESHOLDS = [(10, 'A'), (20, 'B'), (35, 'C'), (55, 'D'), (80, 'E')]
+
+_LOS_FILL = {
+    'A': PatternFill('solid', fgColor='00B050'),
+    'B': PatternFill('solid', fgColor='92D050'),
+    'C': PatternFill('solid', fgColor='FFFF00'),
+    'D': PatternFill('solid', fgColor='FFC000'),
+    'E': PatternFill('solid', fgColor='FF0000'),
+    'F': PatternFill('solid', fgColor='C00000'),
+}
+
+_LOS_FONT = {
+    'A': Font(name='微軟正黑體', bold=True, color='FFFFFF'),
+    'B': Font(name='微軟正黑體', bold=True, color='375623'),
+    'C': Font(name='微軟正黑體', bold=True, color='000000'),
+    'D': Font(name='微軟正黑體', bold=True, color='000000'),
+    'E': Font(name='微軟正黑體', bold=True, color='FFFFFF'),
+    'F': Font(name='微軟正黑體', bold=True, color='FFFFFF'),
+}
+
 from comparison_logic import LOWER_BETTER, METRIC_UNITS, aggregate_periods
 
 
@@ -225,9 +246,15 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
     ws = wb.create_sheet(safe_name)
 
     # 依指標順序並排顯示（排除旅行時間；旅行時間接在最後一個路口來向列之後）
+    # 平均停等延滯額外佔 2 欄放事前／事後服務水準
     metrics_in_results = [k for k in results if k != '旅行時間']
-    n_metrics = len(metrics_in_results)
-    total_cols = max(1 + n_metrics * 4, 5)
+
+    metric_col_starts: dict[str, int] = {}
+    _c = 2
+    for metric in metrics_in_results:
+        metric_col_starts[metric] = _c
+        _c += 6 if metric == '平均停等延滯' else 4
+    total_cols = max(_c - 1, 5)
 
     # 第一列：時段標題
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
@@ -235,22 +262,25 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
     ws.cell(1, 1).font = Font(name='微軟正黑體', bold=True, size=12)
     ws.cell(1, 1).alignment = Alignment(horizontal='center')
 
-    # 第二、三列：欄位標頭（各指標並排：事前平均／事後平均／差異／改善%）
+    # 第二、三列：欄位標頭（各指標並排；平均停等延滯多2欄放服務水準）
     ws.merge_cells(start_row=2, start_column=1, end_row=3, end_column=1)
     item_cell = ws.cell(2, 1, '項目')
     item_cell.font = FONT_WHITE_BOLD
     item_cell.fill = FILL_HEADER
     item_cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    sub_headers = ['事前平均', '事後平均', '差異', '改善%']
-    for m, metric in enumerate(metrics_in_results):
-        c = 2 + m * 4
+    for metric in metrics_in_results:
+        c = metric_col_starts[metric]
+        span = 6 if metric == '平均停等延滯' else 4
         unit = METRIC_UNITS.get(metric, '')
-        ws.merge_cells(start_row=2, start_column=c, end_row=2, end_column=c + 3)
+        ws.merge_cells(start_row=2, start_column=c, end_row=2, end_column=c + span - 1)
         head_cell = ws.cell(2, c, f'{metric} ({unit})')
         head_cell.font = FONT_WHITE_BOLD
         head_cell.fill = FILL_HEADER
         head_cell.alignment = Alignment(horizontal='center')
+        sub_headers = ['事前平均', '事後平均', '差異', '改善%']
+        if metric == '平均停等延滯':
+            sub_headers += ['事前服務水準', '事後服務水準']
         for i, h in enumerate(sub_headers):
             sub_cell = ws.cell(3, c + i, h)
             sub_cell.font = FONT_WHITE_BOLD
@@ -272,8 +302,8 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
     row = 4
     for field in field_order:
         ws.cell(row, 1, field).font = FONT_NORMAL
-        for m, metric in enumerate(metrics_in_results):
-            c = 2 + m * 4
+        for metric in metrics_in_results:
+            c = metric_col_starts[metric]
             mdf = results.get(metric, pd.DataFrame())
             r = mdf[mdf['欄位'] == field] if not mdf.empty else pd.DataFrame()
             if not r.empty:
@@ -282,8 +312,14 @@ def _build_period_sheet(wb, period, results, before_dates, after_dates, include_
                 _write_num(ws.cell(row, c + 1), a, metric)
                 _write_num(ws.cell(row, c + 2), diff, metric)
                 _write_pct(ws.cell(row, c + 3), pct)
+                if metric == '平均停等延滯':
+                    _write_los(ws.cell(row, c + 4), b)
+                    _write_los(ws.cell(row, c + 5), a)
             for cc in range(c, c + 4):
                 ws.cell(row, cc).alignment = Alignment(horizontal='right')
+            if metric == '平均停等延滯':
+                ws.cell(row, c + 4).alignment = Alignment(horizontal='center')
+                ws.cell(row, c + 5).alignment = Alignment(horizontal='center')
         row += 1
 
     # 旅行時間：接續在最後一個路口來向列之後
@@ -406,3 +442,24 @@ def _write_num(cell, val, metric: str):
 def _apply_num_format(cell, metric: str):
     cell.number_format = '0'
     cell.font = FONT_NORMAL
+
+
+def _delay_to_los(delay) -> str:
+    """台灣公路容量手冊：號誌化路口平均停等延滯（秒/輛）→ 服務水準字母。"""
+    if pd.isna(delay):
+        return '—'
+    for threshold, level in _LOS_THRESHOLDS:
+        if delay <= threshold:
+            return level
+    return 'F'
+
+
+def _write_los(cell, delay):
+    los = _delay_to_los(delay)
+    cell.value = los
+    cell.alignment = Alignment(horizontal='center')
+    if los in _LOS_FILL:
+        cell.fill = _LOS_FILL[los]
+        cell.font = _LOS_FONT[los]
+    else:
+        cell.font = FONT_NORMAL
