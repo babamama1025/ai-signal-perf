@@ -916,7 +916,6 @@ with st.sidebar:
     # 選項
     st.subheader('⚙️ 選項')
     include_tt  = st.checkbox('包含旅行時間', value=True)
-    show_detail = st.checkbox('顯示各路口各方向明細', value=True)
     use_special = st.checkbox('計算特殊總停等延滯', value=False)
     special_int_cols: list[str] = []
     if use_special:
@@ -958,7 +957,7 @@ with st.sidebar:
     run_disabled = (not selected_periods or not usable_periods)
     if st.button('🔍 執行分析', type='primary', use_container_width=True, disabled=run_disabled):
         with st.spinner('計算中…'):
-            compare_cols = dl.get_column_structure().get('all_data', system_cols) if show_detail else system_cols
+            compare_cols = dl.get_column_structure().get('all_data', system_cols)
             all_results  = {}
             for period in selected_periods:
                 all_results[period] = cl.compute_comparison(
@@ -1043,7 +1042,7 @@ if st.session_state['analysis_results'] is None:
 2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
 3. 「日期分配」表已依「AI 操作紀錄」自動判斷各日期＋時段的事前／事後（無紀錄視為定時時制／事前），
    可視需要用「⚡ 依操作紀錄自動填入」限縮至特定日期範圍，或直接手動勾選
-4. 視需要勾選「包含旅行時間」、「顯示各路口各方向明細」
+4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
     st.stop()
@@ -1096,6 +1095,10 @@ with st.expander('📝 分析摘要（展開）', expanded=True):
 st.divider()
 
 # ── 分頁：每個時段一個分頁 ────────────────────────────────────────────────────
+show_directions = st.checkbox('顯示全方向績效', value=False,
+                               help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
+_approach_col_set = set(dl.get_approach_columns())
+
 tab_containers = st.tabs(periods) if len(periods) > 1 else [st.container()]
 
 for i, period in enumerate(periods):
@@ -1107,6 +1110,9 @@ for i, period in enumerate(periods):
             if comp_df.empty:
                 st.warning(f'無 {metric} 資料')
                 continue
+
+            if not show_directions and not comp_df.empty:
+                comp_df = comp_df[~comp_df['欄位'].isin(_approach_col_set)].reset_index(drop=True)
 
             display_df, raw_pct = _format_comp_df(comp_df, metric)
             st.dataframe(

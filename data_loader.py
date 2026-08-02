@@ -126,6 +126,14 @@ def get_column_groups() -> dict[str, list[str]]:
     return groups
 
 
+def get_approach_columns() -> list[str]:
+    """回傳所有來向（全方向）欄名列表（路口聚合欄後的 A/B/… 欄）。"""
+    approach_cols = []
+    for cols in get_column_structure().get('groups', {}).values():
+        approach_cols.extend(cols[1:])  # 跳過路口聚合欄本身
+    return approach_cols
+
+
 def get_display_name(col: str) -> str:
     """回傳欄位的顯示名稱（例如 A.1 → 6_A）；無對應則回傳原名稱。"""
     return get_column_structure().get('display_map', {}).get(col, col)
