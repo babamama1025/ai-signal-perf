@@ -1,7 +1,9 @@
 """AI 號誌事前後分析系統 (Streamlit 應用程式)"""
 import re
+import io
 import json
 import base64
+import hashlib
 import requests
 import streamlit as st
 import pandas as pd
@@ -461,6 +463,12 @@ def _load_df(csv_path: str, _mtime: float):
     return df, dict(dl.get_column_structure())
 
 
+@st.cache_data(show_spinner='載入績效資料中…')
+def _load_df_bytes(content: bytes, _hash: str):
+    df = dl.load_performance_csv(io.BytesIO(content))
+    return df, dict(dl.get_column_structure())
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _get_file_last_commit_date(rel_path: str) -> str | None:
     """透過 GitHub API 查詢檔案最後一次 commit 的日期（YYYY/MM/DD）。"""
@@ -489,6 +497,28 @@ def _get_file_last_commit_date(rel_path: str) -> str | None:
 st.sidebar.title('🚦 分析設定')
 st.sidebar.subheader('🗺️ 場域選擇')
 selected_site = st.sidebar.selectbox('選擇分析場域', list(SITE_OPTIONS.keys()))
+
+# 上傳自訂檔案（優先度最高；上傳時下方 selectbox 自動 disable）
+uploaded_csv = st.sidebar.file_uploader(
+    '📂 上傳自訂資料檔（選用）',
+    type='csv',
+    key=f'custom_csv_{selected_site}',
+    help='上傳後優先使用此檔案，下方目錄選擇無效；AI 操作紀錄與日期分配仍依場域設定',
+)
+
+# 從 data/ 目錄選擇其他績效檔案（切換場域時自動重設）
+_avail_csvs    = sorted(p.name for p in DATA_DIR.glob('perf_summary*.csv'))
+_default_csv   = SITE_OPTIONS[selected_site]
+_selected_data_file = st.sidebar.selectbox(
+    '📊 或選擇 data/ 目錄下的資料檔',
+    options=_avail_csvs if _avail_csvs else [_default_csv],
+    index=(_avail_csvs.index(_default_csv) if _default_csv in _avail_csvs else 0),
+    key=f'data_file_{selected_site}',
+    disabled=uploaded_csv is not None,
+    help='上傳自訂檔案時此選擇無效',
+)
+_active_file = uploaded_csv.name if uploaded_csv is not None else _selected_data_file
+st.sidebar.caption(f'使用資料檔：{_active_file}')
 st.sidebar.divider()
 
 # 偵測場域切換，重置日期與分析結果
@@ -498,16 +528,40 @@ if st.session_state.get('_current_site') != selected_site:
     st.session_state.pop('analysis_results', None)
     st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
+# 偵測 data/ 資料檔切換，重置日期與分析結果
+if st.session_state.get('_current_data_file') != _selected_data_file:
+    st.session_state['_current_data_file'] = _selected_data_file
+    st.session_state.pop('date_df', None)
+    st.session_state.pop('_periods_key', None)   # 強制觸發 date_df 重建
+    st.session_state.pop('analysis_results', None)
+    st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
+
+# 偵測上傳檔案變更（新增或移除），重置日期與分析結果
+_upload_content = uploaded_csv.getvalue() if uploaded_csv is not None else None
+_upload_hash    = hashlib.md5(_upload_content).hexdigest() if _upload_content else None
+if st.session_state.get('_uploaded_csv_hash') != _upload_hash:
+    st.session_state['_uploaded_csv_hash'] = _upload_hash
+    st.session_state.pop('date_df', None)
+    st.session_state.pop('_periods_key', None)   # 強制觸發 date_df 重建
+    st.session_state.pop('analysis_results', None)
+    st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
+
 # 載入當前場域資料
-CSV_PATH = DATA_DIR / SITE_OPTIONS[selected_site]
-LOG_PATH = DATA_DIR / LOG_PATHS[selected_site]
+CSV_PATH       = DATA_DIR / _selected_data_file
+LOG_PATH       = DATA_DIR / LOG_PATHS[selected_site]
 SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
 
-if not CSV_PATH.exists():
-    st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
-    st.stop()
-
-df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
+if _upload_content is not None:
+    try:
+        df, col_struct = _load_df_bytes(_upload_content, _upload_hash)
+    except Exception as _e:
+        st.error(f'上傳的 CSV 格式有誤，無法讀取：{_e}')
+        st.stop()
+else:
+    if not CSV_PATH.exists():
+        st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
+        st.stop()
+    df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
 dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
 
 all_dates      = dl.get_available_dates(df)
