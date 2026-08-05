@@ -507,7 +507,12 @@ uploaded_csv = st.sidebar.file_uploader(
 )
 
 # 從 data/ 目錄選擇其他績效檔案（切換場域時自動重設）
-_avail_csvs    = sorted(p.name for p in DATA_DIR.glob('perf_summary*.csv'))
+# 排除其他場域的預設檔，避免誤選
+_other_defaults = {v for k, v in SITE_OPTIONS.items() if k != selected_site}
+_avail_csvs     = sorted(
+    p.name for p in DATA_DIR.glob('perf_summary*.csv')
+    if p.name not in _other_defaults
+)
 _default_csv   = SITE_OPTIONS[selected_site]
 _selected_data_file = st.sidebar.selectbox(
     '📊 或選擇 data/ 目錄下的資料檔',
