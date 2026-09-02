@@ -42,6 +42,7 @@ _LOS_FONT = {
 }
 
 from comparison_logic import LOWER_BETTER, METRIC_UNITS, aggregate_periods
+import data_loader as dl
 
 
 def build_comparison_xlsx(
@@ -52,6 +53,7 @@ def build_comparison_xlsx(
     raw_df: pd.DataFrame | None = None,
     raw_periods: list | None = None,
     extra_summary_entities: list[str] | None = None,
+    day_type_label: str = '平日',
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
@@ -60,6 +62,7 @@ def build_comparison_xlsx(
     _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
                          extra_summary_entities=extra_summary_entities,
                          include_travel_time=include_travel_time)
+    _build_intersection_sheet(wb, all_results, extra_summary_entities, day_type_label)
     for period, results in all_results.items():
         _build_period_sheet(
             wb, period, results,
@@ -239,6 +242,90 @@ def _build_summary_sheet(wb, all_results, before_by_period, after_by_period,
 
     # 說明
     ws.cell(row + 1, 1, '「全時段合計」總停等延滯／通過量為各時段加總，平均停等延滯由加總重新推導，旅行時間為各時段平均；完整日期清單見「分析說明」工作表').font = Font(italic=True, color='666666')
+
+
+_INTERSECTION_METRICS = ['總停等延滯', '通過量', '平均停等延滯']
+_INTERSECTION_METRIC_LABELS = {'總停等延滯': '停等延滯', '通過量': '通過量', '平均停等延滯': '平均停等延滯'}
+
+
+def _build_intersection_sheet(wb, all_results, extra_entities, day_type_label='平日'):
+    """依路口分組、各時段並排的路口績效總覽（列＝路口×指標，欄＝時段×定時/AI/差異/%）。"""
+    ws = wb.create_sheet('路口績效')
+    periods = list(all_results.keys())
+
+    groups = dl.get_column_groups()
+    intersection_names = [k for k in groups if k not in ('系統總量', '旅行時間廊道')]
+    entities = list(extra_entities or []) + intersection_names
+
+    def _has_data(entity: str) -> bool:
+        for period in periods:
+            for metric in _INTERSECTION_METRICS:
+                df = all_results.get(period, {}).get(metric, pd.DataFrame())
+                if not df.empty and entity in df['欄位'].values:
+                    return True
+        return False
+    entities = [e for e in entities if _has_data(e)]
+
+    if not entities or not periods:
+        ws.cell(1, 1, '（無資料）').font = Font(italic=True, color='888888')
+        return
+
+    col_start = 3
+    sub_headers = ['定時時制', 'AI號誌', '差異', '(%)']
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=2)
+    corner = ws.cell(1, 1, day_type_label)
+    corner.font = FONT_WHITE_BOLD
+    corner.fill = FILL_HEADER
+    corner.alignment = Alignment(horizontal='center', vertical='center')
+
+    for i, period in enumerate(periods):
+        c = col_start + i * 4
+        ws.merge_cells(start_row=1, start_column=c, end_row=1, end_column=c + 3)
+        head = ws.cell(1, c, period)
+        head.font = FONT_WHITE_BOLD
+        head.fill = FILL_HEADER
+        head.alignment = Alignment(horizontal='center')
+        for j, h in enumerate(sub_headers):
+            sub_cell = ws.cell(2, c + j, h)
+            sub_cell.font = FONT_WHITE_BOLD
+            sub_cell.fill = FILL_HEADER
+            sub_cell.alignment = Alignment(horizontal='center')
+
+    row = 3
+    for entity in entities:
+        start_row = row
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row + len(_INTERSECTION_METRICS) - 1, end_column=1)
+        ename_cell = ws.cell(start_row, 1, entity)
+        ename_cell.font = FONT_WHITE_BOLD
+        ename_cell.fill = FILL_HEADER
+        ename_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+        for metric in _INTERSECTION_METRICS:
+            mcell = ws.cell(row, 2, _INTERSECTION_METRIC_LABELS[metric])
+            mcell.font = FONT_WHITE_BOLD
+            mcell.fill = FILL_SUBHEADER
+            mcell.alignment = Alignment(vertical='center')
+
+            for i, period in enumerate(periods):
+                c = col_start + i * 4
+                df = all_results.get(period, {}).get(metric, pd.DataFrame())
+                r = df[df['欄位'] == entity] if not df.empty else pd.DataFrame()
+                if not r.empty:
+                    b, a, diff, pct = (r[col].values[0] for col in ['事前平均', '事後平均', '差異', '改善%'])
+                    _write_num(ws.cell(row, c), b, metric)
+                    _write_num(ws.cell(row, c + 1), a, metric)
+                    _write_num(ws.cell(row, c + 2), diff, metric)
+                    _write_pct_plain(ws.cell(row, c + 3), pct)
+                for cc in range(c, c + 4):
+                    ws.cell(row, cc).alignment = Alignment(horizontal='right')
+            row += 1
+
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 14
+    for col in range(col_start, col_start + len(periods) * 4):
+        ws.column_dimensions[get_column_letter(col)].width = 12
+    ws.freeze_panes = 'C3'
 
 
 def _build_period_sheet(wb, period, results, before_dates, after_dates, include_travel_time):
@@ -429,6 +516,17 @@ def _write_pct(cell, pct):
             cell.font = FONT_RED
     else:
         cell.value = '—'
+
+
+def _write_pct_plain(cell, pct):
+    """無底色版本的改善% 寫入（路口績效工作表用）。"""
+    if not pd.isna(pct):
+        cell.value = pct
+        cell.number_format = '0%;-0%;0%'
+        cell.font = FONT_NORMAL
+    else:
+        cell.value = '—'
+        cell.font = FONT_NORMAL
 
 
 def _write_num(cell, val, metric: str):

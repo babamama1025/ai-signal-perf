@@ -1228,6 +1228,7 @@ if st.button('產生 Excel 報告'):
             raw_df=df if include_raw else None,
             raw_periods=periods if include_raw else None,
             extra_summary_entities=extra_entities,
+            day_type_label='假日' if is_weekend else '平日',
         )
     ts = datetime.now().strftime('%Y%m%d_%H%M')
     st.download_button(
