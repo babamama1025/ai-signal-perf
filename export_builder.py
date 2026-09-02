@@ -271,7 +271,7 @@ def _build_intersection_sheet(wb, all_results, extra_entities, day_type_label='�
         return
 
     col_start = 3
-    sub_headers = ['定時時制', 'AI號誌', '差異', '(%)']
+    sub_headers = ['定時時制', 'AI號誌', '差異', '改善%']
 
     ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=2)
     corner = ws.cell(1, 1, day_type_label)
@@ -316,7 +316,7 @@ def _build_intersection_sheet(wb, all_results, extra_entities, day_type_label='�
                     _write_num(ws.cell(row, c), b, metric)
                     _write_num(ws.cell(row, c + 1), a, metric)
                     _write_num(ws.cell(row, c + 2), diff, metric)
-                    _write_pct_plain(ws.cell(row, c + 3), pct)
+                    _write_pct(ws.cell(row, c + 3), pct)
                 for cc in range(c, c + 4):
                     ws.cell(row, cc).alignment = Alignment(horizontal='right')
             row += 1
@@ -516,17 +516,6 @@ def _write_pct(cell, pct):
             cell.font = FONT_RED
     else:
         cell.value = '—'
-
-
-def _write_pct_plain(cell, pct):
-    """無底色版本的改善% 寫入（路口績效工作表用）。"""
-    if not pd.isna(pct):
-        cell.value = pct
-        cell.number_format = '0%;-0%;0%'
-        cell.font = FONT_NORMAL
-    else:
-        cell.value = '—'
-        cell.font = FONT_NORMAL
 
 
 def _write_num(cell, val, metric: str):
