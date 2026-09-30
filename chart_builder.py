@@ -134,6 +134,88 @@ def make_travel_time_chart(tt_df: pd.DataFrame, period: str) -> go.Figure:
     return fig
 
 
+_FLAG_MARKERS = {
+    '較差': dict(color='#C00000', symbol='triangle-up', name='明顯較差'),
+    '較好': dict(color='#2E7D32', symbol='triangle-down', name='明顯較好'),
+}
+
+
+def make_daily_trend_chart(
+    daily: pd.DataFrame,
+    group_means: dict[str, float],
+    title: str,
+    closed_dates: set | None = None,
+) -> go.Figure:
+    """每日趨勢圖：事前／事後各一條線、同組平均虛線、異常日標記、AI 關閉日灰底。
+    daily 為 comparison_logic.analyze_daily 回傳的每日表（資料異常日不畫點）。"""
+    if daily['數值'].notna().sum() == 0:
+        return _empty_fig(f"無資料：{title}")
+
+    plot_df = daily.copy()
+    plot_df.loc[plot_df['標記'] == '資料異常', '數值'] = float('nan')
+    colors = {'事前': COLOR_BEFORE, '事後': COLOR_AFTER}
+    names  = {'事前': '事前（定時）', '事後': '事後（AI）'}
+
+    fig = go.Figure()
+    for d in sorted(closed_dates or []):
+        fig.add_vrect(x0=d - pd.Timedelta(hours=12), x1=d + pd.Timedelta(hours=12),
+                      fillcolor='#BBBBBB', opacity=0.25, line_width=0, layer='below')
+
+    for label in ('事前', '事後'):
+        g = plot_df[plot_df['組別'] == label]
+        if g.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=g['日期'], y=g['數值'], mode='lines+markers', name=names[label],
+            line=dict(color=colors[label], width=2), marker=dict(size=8),
+            customdata=g['差%'] * 100,
+            hovertemplate='%{x|%Y/%m/%d (%a)}<br>%{y:,.1f}<br>與同組平均差 %{customdata:+.1f}%<extra>' + label + '</extra>',
+        ))
+        mean = group_means.get(label, float('nan'))
+        if not pd.isna(mean):
+            fig.add_shape(type='line', x0=g['日期'].min(), x1=g['日期'].max(), y0=mean, y1=mean,
+                          line=dict(color=colors[label], width=1.5, dash='dash'))
+
+    for flag, spec in _FLAG_MARKERS.items():
+        f = plot_df[plot_df['標記'] == flag]
+        if f.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=f['日期'], y=f['數值'], mode='markers', name=spec['name'],
+            marker=dict(color=spec['color'], symbol=spec['symbol'], size=14,
+                        line=dict(color='white', width=2)),
+            hovertemplate='%{x|%Y/%m/%d}<br>%{y:,.1f}<extra>' + spec['name'] + '</extra>',
+        ))
+
+    fig.update_layout(
+        title=title,
+        height=360,
+        margin=dict(t=50, b=40, l=50, r=20),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        hovermode='closest',
+        xaxis=dict(tickformat='%m/%d'),
+    )
+    return fig
+
+
+def make_daily_box_chart(daily: pd.DataFrame, title: str) -> go.Figure:
+    """事前／事後每日數值分布箱形圖（資料異常日不納入）。"""
+    valid = daily[daily['標記'] != '資料異常']
+    if valid['數值'].notna().sum() == 0:
+        return _empty_fig(f"無資料：{title}")
+    fig = go.Figure()
+    for label, color in (('事前', COLOR_BEFORE), ('事後', COLOR_AFTER)):
+        g = valid[valid['組別'] == label]
+        fig.add_trace(go.Box(
+            y=g['數值'], name=label, marker_color=color, boxpoints='all', jitter=0.3,
+            pointpos=0, customdata=g['日期'].dt.strftime('%Y/%m/%d'),
+            hovertemplate='%{customdata}<br>%{y:,.1f}<extra>' + label + '</extra>',
+        ))
+    fig.update_layout(title=title, height=360, showlegend=False,
+                      margin=dict(t=50, b=40, l=50, r=20))
+    return fig
+
+
 def _empty_fig(msg: str) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(text=msg, xref='paper', yref='paper', x=0.5, y=0.5,

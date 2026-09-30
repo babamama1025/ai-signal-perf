@@ -50,9 +50,14 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 - `特殊平均停等延滯 = 特殊總停等延滯(加總) / 系統通過量`（分子為特選路口，分母為全系統）
 - 全時段彙整：`aggregate_special_raws` 將各時段的 raw 數值直接相加，非平均
 
+**每日資料分析（`build_daily_values` / `flag_daily` / `analyze_daily`）：**
+- 每日平均停等延滯 = 當日總停等延滯 / 當日通過量；群組平均 `_group_mean` 與 `compute_comparison` 同口徑（已驗證逐值一致）
+- 標記：0 或缺值 → `資料異常`（不列入統計）；有效天數 ≥ `MIN_DAYS_FOR_OUTLIER`(4) 時，同組內超出 `Q1−k·IQR ~ Q3+k·IQR` 者依 `LOWER_BETTER` 方向標 `較差`／`較好`
+- `改善%_排除異常日`：排除所有有標記的日期後重算，用於檢查結論是否受少數日期影響
+
 ### export_builder.py
 
-**工作表結構：** 分析說明 → 總表（`_build_summary_sheet`）→ 各時段（`_build_period_sheet`）→ 原始資料（選用）
+**工作表結構：** 分析說明 → 總表（`_build_summary_sheet`）→ 路口績效 → 各時段（`_build_period_sheet`）→ 每日明細（`_build_daily_sheet`，選用，每時段一張 `每日_HHMM-HHMM`）→ 原始資料（選用）
 
 **樣式：**
 - `_apply_num_format`：目前所有數值欄一律使用 `'0'`（無逗號整數格式）
@@ -77,6 +82,13 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 `date_selections_N.json`：儲存已確認的事前/事後日期分配，格式為 `{period: {before: [...], after: [...]}}`。
 
 ---
+
+## 主畫面版面
+
+- 分頁上方：共用選擇器（`focus_period`、`focus_metric`、顯示全方向績效）＋ 系統層級關鍵數字（`focus_box` 容器，分析後才填入）
+- 分頁：📊 總覽 → 🔍 時段明細 → 📅 每日分析 → 📋 AI 操作紀錄 → 💾 匯出
+- 「時段明細」與「每日分析」都依共用選擇器顯示單一時段 × 單一指標；重新分析後若原選擇已不存在，會先從 session_state 清除
+- 未執行分析時仍會建立全部分頁（AI 操作紀錄可編輯），其餘分頁顯示提示後 `st.stop()`
 
 ## Streamlit 狀態管理
 

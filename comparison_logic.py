@@ -361,3 +361,116 @@ def generate_analysis_text(
             if total > 0:
                 lines.append(f"- **旅行時間**：{total} 條廊道中 {improving} 條有所改善")
     return "\n".join(lines)
+
+
+# ── 每日資料分析 ────────────────────────────────────────────────────────────
+
+DAILY_WORSE   = '較差'
+DAILY_BETTER  = '較好'
+DAILY_INVALID = '資料異常'
+MIN_DAYS_FOR_OUTLIER = 4   # 有效天數少於此值時不做異常判定
+
+
+def _daily_parts(df, period, dates, metric, cols) -> dict[str, pd.DataFrame]:
+    """回傳每日原始數值（index=日期、columns=cols）。
+    衍生指標回傳 {'num', 'den'}，其餘回傳 {'val'}；旅行時間取有旅行時間資料的指標列。"""
+    period_df = df[df['時段'] == period]
+    date_idx  = pd.DatetimeIndex(sorted({pd.Timestamp(d) for d in dates}))
+
+    def _pivot(m):
+        sub = period_df[period_df['指標'] == m].set_index('日期')
+        return sub.reindex(index=date_idx, columns=cols)
+
+    if metric in DERIVED_METRICS:
+        num_m, den_m = DERIVED_METRICS[metric]
+        return {'num': _pivot(num_m), 'den': _pivot(den_m)}
+    if metric == '旅行時間':
+        tt_metric = _find_tt_metric(df, dl.get_travel_time_columns())
+        return {'val': _pivot(tt_metric)}
+    return {'val': _pivot(metric)}
+
+
+def build_daily_values(df, period, dates, metric, cols) -> pd.DataFrame:
+    """每日數值表（index=日期、columns=cols）。平均停等延滯以當日 總停等延滯 / 通過量 推算。"""
+    parts = _daily_parts(df, period, dates, metric, cols)
+    if 'val' in parts:
+        return parts['val']
+    return parts['num'] / parts['den'].where(parts['den'] != 0)
+
+
+def _group_mean(df, period, dates, metric, col) -> float:
+    """與 compute_comparison 相同口徑的群組平均（衍生指標為 mean(分子) / mean(分母)）。"""
+    if not dates:
+        return float('nan')
+    parts = _daily_parts(df, period, dates, metric, [col])
+    if 'val' in parts:
+        return parts['val'][col].mean()
+    num, den = parts['num'][col].mean(), parts['den'][col].mean()
+    return num / den if _valid_ratio(num, den) else float('nan')
+
+
+def flag_daily(values: pd.Series, metric: str, k: float = 1.5) -> pd.Series:
+    """單一群組、單一欄位的每日標記。
+    0 或缺值 → 資料異常；有效天數 ≥ MIN_DAYS_FOR_OUTLIER 時，
+    超出 [Q1 − k·IQR, Q3 + k·IQR] 者依指標方向標為較差／較好。"""
+    flags   = pd.Series('', index=values.index, dtype=object)
+    invalid = values.isna() | (values == 0)
+    flags[invalid] = DAILY_INVALID
+    valid = values[~invalid]
+    if len(valid) < MIN_DAYS_FOR_OUTLIER:
+        return flags
+    q1, q3 = valid.quantile(0.25), valid.quantile(0.75)
+    iqr    = q3 - q1
+    high   = valid.index[valid > q3 + k * iqr]
+    low    = valid.index[valid < q1 - k * iqr]
+    worse, better = (high, low) if metric in LOWER_BETTER else (low, high)
+    flags[worse]  = DAILY_WORSE
+    flags[better] = DAILY_BETTER
+    return flags
+
+
+def analyze_daily(df, period, before_dates, after_dates, metric, col, k: float = 1.5):
+    """單一欄位的事前／事後每日分析。
+
+    回傳 (daily, summary)：
+    - daily：DataFrame(日期, 組別, 數值, 差%, 標記)，依日期排序；差% 為相對同組平均
+    - summary：{'事前': 統計, '事後': 統計, '改善%': 全部日期, '改善%_排除異常日': 排除有標記的日期}
+      統計含 天數、有效天數、平均（與彙整表同口徑）、中位數、標準差、CV、最佳日、最差日
+    """
+    groups = {'事前': list(before_dates), '事後': list(after_dates)}
+    lower  = metric in LOWER_BETTER
+    parts, summary, kept = [], {}, {}
+
+    for label, dates in groups.items():
+        vals  = build_daily_values(df, period, dates, metric, [col])[col]
+        flags = flag_daily(vals, metric, k)
+        mean  = _group_mean(df, period, dates, metric, col)
+        valid = vals[flags != DAILY_INVALID]
+        best  = (valid.idxmin() if lower else valid.idxmax()) if len(valid) else None
+        worst = (valid.idxmax() if lower else valid.idxmin()) if len(valid) else None
+        std   = valid.std()
+        summary[label] = {
+            '天數':     len(vals),
+            '有效天數': len(valid),
+            '平均':     mean,
+            '中位數':   valid.median(),
+            '標準差':   std,
+            'CV':       std / valid.mean() if len(valid) and valid.mean() else float('nan'),
+            '最佳日':   best,
+            '最差日':   worst,
+        }
+        kept[label] = flags.index[flags == ''].tolist()
+        diff_pct = (vals - mean) / mean if not pd.isna(mean) and mean else vals * float('nan')
+        parts.append(pd.DataFrame({
+            '日期': vals.index, '組別': label, '數值': vals.values,
+            '差%': diff_pct.values, '標記': flags.values,
+        }))
+
+    summary['改善%'] = _improvement_pct(summary['事前']['平均'], summary['事後']['平均'], metric)
+    summary['改善%_排除異常日'] = _improvement_pct(
+        _group_mean(df, period, kept['事前'], metric, col),
+        _group_mean(df, period, kept['事後'], metric, col),
+        metric,
+    )
+    daily = pd.concat(parts, ignore_index=True).sort_values('日期', ignore_index=True)
+    return daily, summary

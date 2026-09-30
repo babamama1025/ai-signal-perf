@@ -530,6 +530,8 @@ st.sidebar.divider()
 # 偵測場域切換，重置日期與分析結果
 if st.session_state.get('_current_site') != selected_site:
     st.session_state['_current_site'] = selected_site
+    # 強制下方時段選擇重新套用預設值；否則切回先前的場域時 multiselect 會顯示為空白
+    st.session_state.pop(f'_day_type_{selected_site}', None)
     st.session_state.pop('date_df', None)
     st.session_state.pop('analysis_results', None)
     st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
@@ -929,10 +931,32 @@ with st.sidebar:
         st.session_state['_save_load_msg'] = load_msg
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
-    if saved_selections:
-        preset_names = [s['name'] for s in saved_selections]
-        st.selectbox('選擇已儲存的分配', preset_names, key='load_selection_name')
+    show_all_types = st.checkbox('顯示全部日期類型', value=False, key='show_all_preset_types')
+    visible_selections = sorted(
+        (s for s in saved_selections if show_all_types or s['day_type'] == day_type),
+        key=lambda s: s['saved_at'],
+        reverse=True,
+    )
+    preset_names = [s['name'] for s in visible_selections]
+    # 過濾條件改變後，原選取值可能已不在選項中，先清除以免 selectbox 報錯
+    if st.session_state.get('load_selection_name') not in preset_names:
+        st.session_state.pop('load_selection_name', None)
+
+    if visible_selections:
+        # 已依日期類型過濾時，類型標籤是多餘的，只在顯示全部時附上
+        preset_labels = {
+            s['name']: ' · '.join(
+                [s['name']]
+                + ([('假日' if s['day_type'] == '週末（六、日）' else '平日')] if show_all_types else [])
+                + [s['saved_at'][5:10]]
+            )
+            for s in visible_selections
+        }
+        st.selectbox('選擇已儲存的分配（可輸入文字搜尋）', preset_names,
+                     format_func=preset_labels.get, key='load_selection_name')
         st.button('📂 載入所選分配', use_container_width=True, on_click=_apply_load_preset)
+    elif saved_selections:
+        st.caption(f'尚無「{day_type}」的已儲存分配，可勾選「顯示全部日期類型」')
     else:
         st.caption('尚無已儲存的日期分配')
 
@@ -947,7 +971,7 @@ with st.sidebar:
     if msg := st.session_state.pop('_edit_msg', None):
         st.success(msg)
 
-    if saved_selections:
+    if visible_selections:
         cur_name = st.session_state.get('load_selection_name', '')
 
         if st.button(f'✏️ 重新命名「{cur_name}」', use_container_width=True):
@@ -1066,8 +1090,16 @@ with st.sidebar:
 st.title('🚦 AI 號誌事前後分析系統')
 st.subheader(f'場域：{selected_site}')
 
+
+# ── 關鍵數字列與共用選擇器（分析後才填入，位置在分頁上方）───────────────────────
+focus_box = st.container()
+
+tab_overview, tab_detail, tab_daily, tab_log, tab_export = st.tabs(
+    ['📊 總覽', '🔍 時段明細', '📅 每日分析', '📋 AI 操作紀錄', '💾 匯出']
+)
+
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
-with st.expander('📋 AI 操作紀錄', expanded=False):
+with tab_log:
     st.caption(
         f'紀錄檔：`{LOG_PATH.name}`（位於 data 資料夾，可用 Excel 直接開啟修改）  \n'
         '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
@@ -1108,8 +1140,9 @@ with st.expander('📋 AI 操作紀錄', expanded=False):
         st.success(msg)
 
 if st.session_state['analysis_results'] is None:
-    st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
-    st.markdown("""
+    with tab_overview:
+        st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
+        st.markdown("""
 **使用步驟：**
 1. 左側選擇「場域」（桃園四期大湳 或 桃園三期高鐵）
 2. 選擇「日期類型」（平常日 / 週末）—— 分析時段會自動切換
@@ -1118,6 +1151,8 @@ if st.session_state['analysis_results'] is None:
 4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
+    for _t in (tab_detail, tab_daily, tab_export):
+        _t.info('請先在左側設定分析條件並點擊「執行分析」。')
     st.stop()
 
 # 取出分析結果
@@ -1129,112 +1164,270 @@ periods         = saved['periods']
 inc_tt          = saved['include_tt']
 special_raws    = saved.get('special_raws', {})
 
-# ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
-summary_rows = [
-    {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
-    for p in periods
-]
-st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
-# ── 全時段合計概覽 ────────────────────────────────────────────────────────────
-st.subheader('📊 系統層級改善率概覽')
-_cap_col, _info_col = st.columns([10, 1])
-_cap_col.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
-if inc_tt:
-    with _info_col:
-        if st.button('ℹ️', help='旅行時間加權計算方式', key='tt_info_btn'):
-            _show_tt_info_dialog()
-overview_all    = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
-agg_special_raw = cl.aggregate_special_raws(special_raws, periods) if special_raws else None
-agg_special     = cl.format_special_metrics(agg_special_raw) if agg_special_raw else None
-_display_overview_table(overview_all, inc_tt, extra_entities, agg_special)
+# ── 共用選擇器（時段明細、每日分析共用）＋ 系統層級關鍵數字 ──────────────────────
+_focus_metrics = ['平均停等延滯', '總停等延滯', '通過量'] + (['旅行時間'] if inc_tt else [])
+# 重新分析後時段或指標清單可能改變，失效的選擇先清除，避免 selectbox 取到不存在的值
+if st.session_state.get('focus_period') not in periods:
+    st.session_state.pop('focus_period', None)
+if st.session_state.get('focus_metric') not in _focus_metrics:
+    st.session_state.pop('focus_metric', None)
 
-st.divider()
+with focus_box:
+    _fc1, _fc2, _fc3 = st.columns([2, 2, 2])
+    focus_period = _fc1.selectbox('時段', periods, key='focus_period',
+                                  help='「時段明細」與「每日分析」分頁共用此設定')
+    focus_metric = _fc2.selectbox('指標', _focus_metrics, key='focus_metric',
+                                  help='「時段明細」與「每日分析」分頁共用此設定')
+    _fc3.markdown('<div style="height: 1.9rem"></div>', unsafe_allow_html=True)
+    show_directions = _fc3.checkbox('顯示全方向績效', value=False,
+                                    help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
 
-# ── 概覽表 ────────────────────────────────────────────────────────────────────
-st.subheader('📊 各時段系統層級改善率概覽')
-for period, results in all_results.items():
-    if len(all_results) > 1:
-        st.markdown(f"**⏱ {period}**")
-    period_special = cl.format_special_metrics(special_raws[period]) if special_raws.get(period) else None
-    _display_overview_table(results, inc_tt, extra_entities, period_special)
+    # (卡片標題, 結果表指標, 欄位)；加權平均旅行時間只在有此廊道欄且納入旅行時間時顯示
+    # 分左右兩欄（「事前 → 事後」字串較長，4 欄並排時會被截斷）：
+    # 左欄 平均停等延滯、加權平均旅行時間；右欄 總停等延滯、通過量
+    _left  = [('系統 平均停等延滯', '平均停等延滯', '系統')]
+    if inc_tt and '加權平均旅行時間' in dl.get_travel_time_columns():
+        _left.append(('加權平均旅行時間', '旅行時間', '加權平均旅行時間'))
+    _right = [(f'系統 {_m}', _m, '系統') for _m in ['總停等延滯', '通過量']]
+    _kpi_l, _kpi_r = st.columns(2)
+    for _col, (_label, _m, _entity) in [(_kpi_l, k) for k in _left] + [(_kpi_r, k) for k in _right]:
+        _mdf = all_results.get(focus_period, {}).get(_m, pd.DataFrame())
+        _row = _mdf[_mdf['欄位'] == _entity] if not _mdf.empty else _mdf
+        if _row.empty:
+            _col.metric(_label, '—')
+            continue
+        _b, _a, _pct = (_row[c].values[0] for c in ['事前平均', '事後平均', '改善%'])
+        _f = '{:,.0f}' if _m == '通過量' else '{:,.1f}'
+        _col.metric(
+            f'{_label}（{cl.METRIC_UNITS[_m]}）',
+            f'{_f.format(_b)} → {_f.format(_a)}',
+            None if pd.isna(_pct) else f'{_pct * 100:+.1f}% '
+            + (('增加' if _pct >= 0 else '減少') if _m == '通過量' else ('改善' if _pct >= 0 else '惡化')),
+        )
+    st.caption(f'關鍵數字為 {_esc_md(focus_period)} 時段、事前 {len(bd_by_period[focus_period])} 日 / '
+               f'事後 {len(ad_by_period[focus_period])} 日的結果；綠色＝改善。')
 
-# ── 分析摘要 ──────────────────────────────────────────────────────────────────
-with st.expander('📝 分析摘要（展開）', expanded=True):
-    before_counts = {p: len(bd_by_period[p]) for p in periods}
-    after_counts  = {p: len(ad_by_period[p]) for p in periods}
-    st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
+# ── 總覽 ──────────────────────────────────────────────────────────────────────
+with tab_overview:
+    # ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
+    summary_rows = [
+        {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
+        for p in periods
+    ]
+    st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
-st.divider()
+    # ── 全時段合計概覽 ────────────────────────────────────────────────────────────
+    st.subheader('📊 系統層級改善率概覽')
+    _cap_col, _info_col = st.columns([10, 1])
+    _cap_col.caption('整合所有已選時段：總停等延滯／通過量採加總計算，平均停等延滯由加總後重新推導，旅行時間採各時段平均。')
+    if inc_tt:
+        with _info_col:
+            if st.button('ℹ️', help='旅行時間加權計算方式', key='tt_info_btn'):
+                _show_tt_info_dialog()
+    overview_all    = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
+    agg_special_raw = cl.aggregate_special_raws(special_raws, periods) if special_raws else None
+    agg_special     = cl.format_special_metrics(agg_special_raw) if agg_special_raw else None
+    _display_overview_table(overview_all, inc_tt, extra_entities, agg_special)
 
-# ── 分頁：每個時段一個分頁 ────────────────────────────────────────────────────
-show_directions = st.checkbox('顯示全方向績效', value=False,
-                               help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
+    st.divider()
+
+    # ── 概覽表 ────────────────────────────────────────────────────────────────────
+    st.subheader('📊 各時段系統層級改善率概覽')
+    for period, results in all_results.items():
+        if len(all_results) > 1:
+            st.markdown(f"**⏱ {period}**")
+        period_special = cl.format_special_metrics(special_raws[period]) if special_raws.get(period) else None
+        _display_overview_table(results, inc_tt, extra_entities, period_special)
+
+    # ── 分析摘要 ──────────────────────────────────────────────────────────────────
+    with st.expander('📝 分析摘要（展開）', expanded=False):
+        before_counts = {p: len(bd_by_period[p]) for p in periods}
+        after_counts  = {p: len(ad_by_period[p]) for p in periods}
+        st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
+
+
+# ── 時段明細：依共用選擇器顯示單一時段 × 單一指標 ────────────────────────────
 _approach_col_set = set(dl.get_approach_columns())
 
-tab_containers = st.tabs(periods) if len(periods) > 1 else [st.container()]
-
-for i, period in enumerate(periods):
-    results = all_results.get(period, {})
-    with tab_containers[i]:
-        for metric in ['平均停等延滯', '總停等延滯', '通過量']:
-            comp_df = results.get(metric, pd.DataFrame())
-            st.subheader(f'📊 {metric}')
-            if comp_df.empty:
-                st.warning(f'無 {metric} 資料')
-                continue
-
-            if not show_directions and not comp_df.empty:
-                comp_df = comp_df[~comp_df['欄位'].isin(_approach_col_set)].reset_index(drop=True)
-
-            display_df, raw_pct = _format_comp_df(comp_df, metric)
-            st.dataframe(
-                display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.plotly_chart(
-                cb.make_metric_bar_chart(comp_df, metric, period),
-                use_container_width=True,
-            )
-
-        if inc_tt:
-            tt_df = results.get('旅行時間', pd.DataFrame())
-            if not tt_df.empty:
-                st.subheader('🛣️ 旅行時間')
-                disp_tt, raw_pct_tt = _format_comp_df(tt_df, '旅行時間')
-                st.dataframe(
-                    disp_tt.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct_tt),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.plotly_chart(
-                    cb.make_travel_time_chart(tt_df, period),
-                    use_container_width=True,
-                )
-
-# ── Excel 匯出 ────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader('💾 匯出報告')
-include_raw = st.checkbox(
-    '包含原始資料工作表',
-    value=False,
-    help='勾選後，Excel 報告末頁會加入「原始資料」工作表，列出所選日期的完整數據',
-)
-if st.button('產生 Excel 報告'):
-    with st.spinner('產生 Excel 中…'):
-        buf = eb.build_comparison_xlsx(
-            all_results, bd_by_period, ad_by_period,
-            include_travel_time=inc_tt,
-            raw_df=df if include_raw else None,
-            raw_periods=periods if include_raw else None,
-            extra_summary_entities=extra_entities,
-            day_type_label='假日' if is_weekend else '平日',
+with tab_detail:
+    comp_df = all_results.get(focus_period, {}).get(focus_metric, pd.DataFrame())
+    st.subheader(f'{"🛣️" if focus_metric == "旅行時間" else "📊"} {_esc_md(focus_period)}　{focus_metric}')
+    if comp_df.empty:
+        st.warning(f'無 {focus_metric} 資料')
+    else:
+        if focus_metric != '旅行時間' and not show_directions:
+            comp_df = comp_df[~comp_df['欄位'].isin(_approach_col_set)].reset_index(drop=True)
+        display_df, raw_pct = _format_comp_df(comp_df, focus_metric)
+        st.dataframe(
+            display_df.style.apply(_highlight_pct_col, axis=0, raw_pct=raw_pct),
+            use_container_width=True,
+            hide_index=True,
         )
-    ts = datetime.now().strftime('%Y%m%d_%H%M')
-    st.download_button(
-        label='⬇️ 下載 Excel 報告',
-        data=buf,
-        file_name=f'績效比較_{selected_site}_{ts}.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        st.plotly_chart(
+            cb.make_travel_time_chart(comp_df, focus_period) if focus_metric == '旅行時間'
+            else cb.make_metric_bar_chart(comp_df, focus_metric, focus_period),
+            use_container_width=True,
+        )
+
+
+with tab_daily:
+    # ── 每日資料分析 ──────────────────────────────────────────────────────────────
+    st.caption(f'{_esc_md(focus_period)}　{focus_metric}：逐日檢視事前／事後數值；以 IQR 法在同組內找出明顯較差／較好的日期。'
+               '數值為 0 或缺值的日期標為「資料異常」，不列入統計與異常判定。')
+
+    daily_period, daily_metric = focus_period, focus_metric
+    _dc1, _dc2 = st.columns(2)
+    daily_scope  = _dc1.radio('顯示範圍', ['事前＋事後', '只看事前', '只看事後'],
+                              horizontal=True, key='daily_scope')
+    daily_k      = _dc2.slider('異常門檻（IQR 倍數）', 1.0, 3.0, 1.5, 0.5, key='daily_k',
+                               help='超出 Q1 − k×IQR ～ Q3 + k×IQR 範圍者視為異常；k 越小標記越多')
+
+    if daily_metric == '旅行時間':
+        _entity_opts = dl.get_travel_time_columns()
+    else:
+        _groups = dl.get_column_structure().get('groups', {})
+        _entity_opts = dl.get_system_columns() + list(_groups)
+        if show_directions:
+            _entity_opts += dl.get_approach_columns()
+    daily_cols = st.multiselect(
+        '對象', _entity_opts, default=_entity_opts[:1], format_func=dl.get_display_name,
+        key=f'daily_cols_{daily_metric}_{show_directions}',
     )
+
+    if daily_cols:
+        _unit     = cl.METRIC_UNITS.get(daily_metric, '')
+        _num_fmt  = '{:,.0f}' if daily_metric == '通過量' else '{:,.1f}'
+        _status   = _period_status_map(_load_log(), [daily_period])
+        _b_dates  = bd_by_period[daily_period]
+        _a_dates  = ad_by_period[daily_period]
+        _analyses = {c: cl.analyze_daily(df, daily_period, _b_dates, _a_dates, daily_metric, c, daily_k)
+                     for c in daily_cols}
+        _scope_groups = {'事前＋事後': ('事前', '事後'), '只看事前': ('事前',), '只看事後': ('事後',)}[daily_scope]
+        _flag_icons = {cl.DAILY_WORSE: '🔴 較差', cl.DAILY_BETTER: '🟢 較好', cl.DAILY_INVALID: '⚠️ 資料異常'}
+
+        # 每日明細表（一列一天，每個對象三欄：數值／差%／標記）
+        _base = _analyses[daily_cols[0]][0]
+        _base = _base[_base['組別'].isin(_scope_groups)]
+        tbl = pd.DataFrame({
+            '日期':    _base['日期'].dt.strftime('%Y/%m/%d'),
+            '星期':    _base['日期'].apply(lambda d: dl.TW_WEEKDAY[d.weekday()]),
+            '組別':    _base['組別'],
+            'AI 狀態': _base['日期'].apply(lambda d: _status.get((d.strftime('%Y/%m/%d'), daily_period), '—')),
+        })
+        _flag_by_col: dict[str, pd.Series] = {}
+        for c in daily_cols:
+            d = _analyses[c][0].loc[_base.index]
+            name = dl.get_display_name(c)
+            tbl[name]           = d['數值']
+            tbl[f'{name} 差%']  = d['差%']
+            tbl[f'{name} 標記'] = d['標記'].map(_flag_icons).fillna('')
+            _flag_by_col[name]  = d['標記']
+
+        _flag_bg = {cl.DAILY_WORSE: 'background-color: #FFC7CE',
+                    cl.DAILY_BETTER: 'background-color: #C6EFCE',
+                    cl.DAILY_INVALID: 'background-color: #FFF2CC'}
+        _lower = daily_metric in cl.LOWER_BETTER
+
+        def _daily_style(frame):
+            sty = pd.DataFrame('', index=frame.index, columns=frame.columns)
+            for name, flags in _flag_by_col.items():
+                sty[name] = flags.map(_flag_bg).fillna('')
+                pct = frame[f'{name} 差%']
+                worse = pct > 0 if _lower else pct < 0
+                sty[f'{name} 差%'] = [
+                    '' if pd.isna(v) else ('color: #b00020' if w else 'color: #1a7a2e')
+                    for v, w in zip(pct, worse)
+                ]
+            return sty
+
+        _fmt = {name: _num_fmt for name in _flag_by_col}
+        _fmt.update({f'{name} 差%': '{:+.1%}' for name in _flag_by_col})
+        st.markdown(f'**{_esc_md(daily_period)}　{daily_metric}（{_unit}）每日明細**　'
+                    '— 點欄位標題可排序；右上角可下載 CSV')
+        st.dataframe(
+            tbl.style.apply(_daily_style, axis=None).format(_fmt, na_rep='—'),
+            use_container_width=True, hide_index=True,
+        )
+
+        # 各對象：統計摘要 + 趨勢圖 + 分布圖
+        _closed = {pd.Timestamp(d) for (d, _p), v in _status.items() if v == '關閉'}
+        _shown  = set(_base['日期'])
+        for c in daily_cols:
+            daily, summ = _analyses[c]
+            daily = daily[daily['組別'].isin(_scope_groups)]
+            name  = dl.get_display_name(c)
+            st.markdown(f'#### {name}')
+
+            m1, m2 = st.columns(2)
+            _pct = lambda v: '—' if pd.isna(v) else f'{v * 100:+.1f}%'
+            m1.metric('改善率（全部日期）', _pct(summ['改善%']))
+            m2.metric('改善率（排除有標記的日期）', _pct(summ['改善%_排除異常日']),
+                      help='排除「較差／較好／資料異常」日期後重新計算；與全部日期差距大，代表結論受少數日期影響')
+
+            _fmt_v = lambda v: '—' if pd.isna(v) else _num_fmt.format(v)
+            _fmt_d = lambda d: '—' if d is None else dl.format_date(d)
+            stat_rows = []
+            for g in _scope_groups:
+                sg = summ[g]
+                stat_rows.append({
+                    '組別': g,
+                    '天數（有效/總計）': f"{sg['有效天數']}/{sg['天數']}",
+                    '平均': _fmt_v(sg['平均']),
+                    '中位數': _fmt_v(sg['中位數']),
+                    '標準差': _fmt_v(sg['標準差']),
+                    'CV': '—' if pd.isna(sg['CV']) else f"{sg['CV']:.1%}",
+                    '最佳日': _fmt_d(sg['最佳日']),
+                    '最差日': _fmt_d(sg['最差日']),
+                })
+            st.dataframe(pd.DataFrame(stat_rows), use_container_width=True, hide_index=True)
+            _few = [g for g in _scope_groups if summ[g]['有效天數'] < cl.MIN_DAYS_FOR_OUTLIER]
+            if _few:
+                st.caption(f'ℹ️ {"、".join(_few)}有效天數少於 {cl.MIN_DAYS_FOR_OUTLIER} 天，不做異常判定。')
+
+            ch1, ch2 = st.columns([3, 1])
+            ch1.plotly_chart(
+                cb.make_daily_trend_chart(
+                    daily, {g: summ[g]['平均'] for g in _scope_groups},
+                    f'{name}　{daily_metric}（{_unit}）每日趨勢',
+                    closed_dates=_closed & _shown,
+                ),
+                use_container_width=True,
+            )
+            ch2.plotly_chart(cb.make_daily_box_chart(daily, '分布'), use_container_width=True)
+        if _closed & _shown:
+            st.caption('趨勢圖灰底 = AI 操作紀錄中該時段狀態為「關閉」的日期。')
+
+with tab_export:
+    # ── Excel 匯出 ────────────────────────────────────────────────────────────────
+    include_raw = st.checkbox(
+        '包含原始資料工作表',
+        value=False,
+        help='勾選後，Excel 報告末頁會加入「原始資料」工作表，列出所選日期的完整數據',
+    )
+    include_daily = st.checkbox(
+        '包含每日明細工作表',
+        value=True,
+        help='每個時段一張「每日_」工作表：列出系統、路口（與旅行時間）的每日數值，'
+             '並依「每日分析」分頁的「異常門檻」設定標示明顯較差／較好的日期',
+    )
+    if st.button('產生 Excel 報告'):
+        with st.spinner('產生 Excel 中…'):
+            buf = eb.build_comparison_xlsx(
+                all_results, bd_by_period, ad_by_period,
+                include_travel_time=inc_tt,
+                raw_df=df if include_raw else None,
+                raw_periods=periods if include_raw else None,
+                extra_summary_entities=extra_entities,
+                day_type_label='假日' if is_weekend else '平日',
+                daily_df=df if include_daily else None,
+                daily_k=daily_k,
+                daily_status_map=_period_status_map(_load_log(), periods) if include_daily else None,
+            )
+        ts = datetime.now().strftime('%Y%m%d_%H%M')
+        st.download_button(
+            label='⬇️ 下載 Excel 報告',
+            data=buf,
+            file_name=f'績效比較_{selected_site}_{ts}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )

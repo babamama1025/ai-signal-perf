@@ -41,7 +41,10 @@ _LOS_FONT = {
     'F': Font(name='微軟正黑體', bold=True, color='FFFFFF'),
 }
 
-from comparison_logic import LOWER_BETTER, METRIC_UNITS, aggregate_periods
+from comparison_logic import (
+    LOWER_BETTER, METRIC_UNITS, aggregate_periods, analyze_daily,
+    DAILY_WORSE, DAILY_BETTER, DAILY_INVALID,
+)
 import data_loader as dl
 
 
@@ -54,6 +57,9 @@ def build_comparison_xlsx(
     raw_periods: list | None = None,
     extra_summary_entities: list[str] | None = None,
     day_type_label: str = '平日',
+    daily_df: pd.DataFrame | None = None,
+    daily_k: float = 1.5,
+    daily_status_map: dict | None = None,
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
@@ -69,6 +75,13 @@ def build_comparison_xlsx(
             before_by_period.get(period, []), after_by_period.get(period, []),
             include_travel_time,
         )
+    if daily_df is not None:
+        for period in all_results:
+            _build_daily_sheet(
+                wb, daily_df, period,
+                before_by_period.get(period, []), after_by_period.get(period, []),
+                include_travel_time, daily_k, daily_status_map or {},
+            )
     if raw_df is not None and raw_periods:
         _build_raw_data_sheet(wb, raw_df, before_by_period, after_by_period, raw_periods)
 
@@ -467,6 +480,87 @@ def _build_raw_data_sheet(wb, df: pd.DataFrame, before_by_period, after_by_perio
     for i in range(5, len(headers) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 11
     ws.freeze_panes = 'A2'
+
+
+FILL_YELLOW = PatternFill('solid', fgColor='FFF2CC')
+_DAILY_FLAG_FILL = {DAILY_WORSE: FILL_RED, DAILY_BETTER: FILL_GREEN, DAILY_INVALID: FILL_YELLOW}
+_DAILY_METRICS = ['平均停等延滯', '總停等延滯', '通過量']
+
+
+def _build_daily_sheet(wb, df, period, before_dates, after_dates,
+                       include_travel_time, k, status_map):
+    """每日明細（列＝日期，欄＝指標×對象），依同組 IQR 判定結果著色，末尾附各組平均與改善率。"""
+    ws = wb.create_sheet(('每日_' + period.replace(':', '').replace('~', '-'))[:31])
+
+    entities = dl.get_system_columns() + list(dl.get_column_structure().get('groups', {}))
+    blocks = [(m, entities) for m in _DAILY_METRICS]
+    if include_travel_time and dl.get_travel_time_columns():
+        blocks.append(('旅行時間', dl.get_travel_time_columns()))
+    columns = [(m, c) for m, cols in blocks for c in cols]
+    analyses = {(m, c): analyze_daily(df, period, before_dates, after_dates, m, c, k)
+                for m, c in columns}
+
+    fixed = ['日期', '星期', '組別', 'AI 狀態']
+    total_cols = len(fixed) + len(columns)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=min(total_cols, 12))
+    ws.cell(1, 1, f'{period} 每日明細 │ 異常門檻 IQR×{k:g} │ '
+                  '紅底＝明顯較差、綠底＝明顯較好、黃底＝資料異常（0 或缺值）').font = FONT_BOLD
+
+    for i, h in enumerate(fixed, 1):
+        ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
+        cell = ws.cell(2, i, h)
+        cell.font, cell.fill = FONT_WHITE_BOLD, FILL_HEADER
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    c = len(fixed) + 1
+    for metric, cols in blocks:
+        ws.merge_cells(start_row=2, start_column=c, end_row=2, end_column=c + len(cols) - 1)
+        head = ws.cell(2, c, f'{metric} ({METRIC_UNITS.get(metric, "")})')
+        head.font, head.fill = FONT_WHITE_BOLD, FILL_HEADER
+        head.alignment = Alignment(horizontal='center')
+        for j, col in enumerate(cols):
+            sub = ws.cell(3, c + j, dl.get_display_name(col))
+            sub.font, sub.fill = FONT_BOLD, FILL_SUBHEADER
+            sub.alignment = Alignment(horizontal='center', wrap_text=True)
+        c += len(cols)
+
+    base = analyses[columns[0]][0]
+    row = 4
+    for idx, d in base['日期'].items():
+        d_str = d.strftime('%Y/%m/%d')
+        ws.cell(row, 1, d_str).font = FONT_NORMAL
+        ws.cell(row, 2, _fmt_date(d)[-3:-1]).font = FONT_NORMAL
+        ws.cell(row, 3, base.at[idx, '組別']).font = FONT_NORMAL
+        ws.cell(row, 4, status_map.get((d_str, period), '—')).font = FONT_NORMAL
+        for j, key in enumerate(columns):
+            daily = analyses[key][0]
+            cell = ws.cell(row, len(fixed) + 1 + j)
+            _write_num(cell, daily.at[idx, '數值'], key[0])
+            if daily.at[idx, '標記'] in _DAILY_FLAG_FILL:
+                cell.fill = _DAILY_FLAG_FILL[daily.at[idx, '標記']]
+        row += 1
+
+    row += 1
+    for label, getter, is_pct in [
+        ('事前平均', lambda s: s['事前']['平均'], False),
+        ('事後平均', lambda s: s['事後']['平均'], False),
+        ('改善%（全部日期）', lambda s: s['改善%'], True),
+        ('改善%（排除有標記日期）', lambda s: s['改善%_排除異常日'], True),
+    ]:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(fixed))
+        lab = ws.cell(row, 1, label)
+        lab.font, lab.fill = FONT_BOLD, FILL_SUMMARY_HDR
+        for j, key in enumerate(columns):
+            cell = ws.cell(row, len(fixed) + 1 + j)
+            val = getter(analyses[key][1])
+            _write_pct(cell, val) if is_pct else _write_num(cell, val, key[0])
+        row += 1
+
+    ws.column_dimensions['A'].width = 12
+    for col in range(2, len(fixed) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 8
+    for col in range(len(fixed) + 1, total_cols + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 12
+    ws.freeze_panes = ws.cell(4, len(fixed) + 1)
 
 
 def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fill, total_cols: int = 5) -> int:
