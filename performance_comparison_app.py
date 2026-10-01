@@ -1094,12 +1094,20 @@ st.subheader(f'場域：{selected_site}')
 # ── 關鍵數字列與共用選擇器（分析後才填入，位置在分頁上方）───────────────────────
 focus_box = st.container()
 
-tab_overview, tab_detail, tab_daily, tab_log, tab_export = st.tabs(
-    ['📊 總覽', '🔍 時段明細', '📅 每日分析', '📋 AI 操作紀錄', '💾 匯出']
-)
+# 分頁以 radio 實作：st.tabs 無法得知目前分頁，橫幅與選擇器需依分頁切換。
+# 只有目前分頁的 widget 會被渲染，未渲染者的狀態會被 Streamlit 清除，故先自我指派保留。
+st.session_state.setdefault('daily_k', 1.5)
+for _k in ('focus_period', 'focus_metric', 'show_directions', 'daily_scope', 'daily_k'):
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
+
+VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_LOG, VIEW_EXPORT = (
+    '📊 總覽', '🔍 時段明細', '📅 每日分析', '📋 AI 操作紀錄', '💾 匯出')
+view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_LOG, VIEW_EXPORT],
+                horizontal=True, key='main_view', label_visibility='collapsed')
 
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
-with tab_log:
+if view == VIEW_LOG:
     st.caption(
         f'紀錄檔：`{LOG_PATH.name}`（位於 data 資料夾，可用 Excel 直接開啟修改）  \n'
         '**狀態**欄：啟動 = AI 號誌運行中；關閉 = 退回定時時制（請填備註說明原因）  \n'
@@ -1140,7 +1148,7 @@ with tab_log:
         st.success(msg)
 
 if st.session_state['analysis_results'] is None:
-    with tab_overview:
+    if view == VIEW_OVERVIEW:
         st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
         st.markdown("""
 **使用步驟：**
@@ -1151,8 +1159,8 @@ if st.session_state['analysis_results'] is None:
 4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
-    for _t in (tab_detail, tab_daily, tab_export):
-        _t.info('請先在左側設定分析條件並點擊「執行分析」。')
+    elif view != VIEW_LOG:
+        st.info('請先在左側設定分析條件並點擊「執行分析」。')
     st.stop()
 
 # 取出分析結果
@@ -1173,15 +1181,23 @@ if st.session_state.get('focus_period') not in periods:
 if st.session_state.get('focus_metric') not in _focus_metrics:
     st.session_state.pop('focus_metric', None)
 
+overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
+# 時段明細／每日分析：顯示選擇器，橫幅為所選時段；其餘分頁：隱藏選擇器，橫幅為全時段合計
+_focus_view = view in (VIEW_DETAIL, VIEW_DAILY)
+
 with focus_box:
-    _fc1, _fc2, _fc3 = st.columns([2, 2, 2])
-    focus_period = _fc1.selectbox('時段', periods, key='focus_period',
-                                  help='「時段明細」與「每日分析」分頁共用此設定')
-    focus_metric = _fc2.selectbox('指標', _focus_metrics, key='focus_metric',
-                                  help='「時段明細」與「每日分析」分頁共用此設定')
-    _fc3.markdown('<div style="height: 1.9rem"></div>', unsafe_allow_html=True)
-    show_directions = _fc3.checkbox('顯示全方向績效', value=False,
-                                    help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
+    if _focus_view:
+        _fc1, _fc2, _fc3 = st.columns([2, 2, 2])
+        focus_period = _fc1.selectbox('時段', periods, key='focus_period',
+                                      help='「時段明細」與「每日分析」分頁共用此設定')
+        focus_metric = _fc2.selectbox('指標', _focus_metrics, key='focus_metric',
+                                      help='「時段明細」與「每日分析」分頁共用此設定')
+        _fc3.markdown('<div style="height: 1.9rem"></div>', unsafe_allow_html=True)
+        show_directions = _fc3.checkbox('顯示全方向績效', value=False, key='show_directions',
+                                        help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
+        _kpi_src = all_results.get(focus_period, {})
+    else:
+        _kpi_src = overview_all
 
     # (卡片標題, 結果表指標, 欄位)；加權平均旅行時間只在有此廊道欄且納入旅行時間時顯示
     # 分左右兩欄（「事前 → 事後」字串較長，4 欄並排時會被截斷）：
@@ -1192,7 +1208,7 @@ with focus_box:
     _right = [(f'系統 {_m}', _m, '系統') for _m in ['總停等延滯', '通過量']]
     _kpi_l, _kpi_r = st.columns(2)
     for _col, (_label, _m, _entity) in [(_kpi_l, k) for k in _left] + [(_kpi_r, k) for k in _right]:
-        _mdf = all_results.get(focus_period, {}).get(_m, pd.DataFrame())
+        _mdf = _kpi_src.get(_m, pd.DataFrame())
         _row = _mdf[_mdf['欄位'] == _entity] if not _mdf.empty else _mdf
         if _row.empty:
             _col.metric(_label, '—')
@@ -1205,11 +1221,14 @@ with focus_box:
             None if pd.isna(_pct) else f'{_pct * 100:+.1f}% '
             + (('增加' if _pct >= 0 else '減少') if _m == '通過量' else ('改善' if _pct >= 0 else '惡化')),
         )
-    st.caption(f'關鍵數字為 {_esc_md(focus_period)} 時段、事前 {len(bd_by_period[focus_period])} 日 / '
-               f'事後 {len(ad_by_period[focus_period])} 日的結果；綠色＝改善。')
+    if _focus_view:
+        st.caption(f'關鍵數字為 {_esc_md(focus_period)} 時段、事前 {len(bd_by_period[focus_period])} 日 / '
+                   f'事後 {len(ad_by_period[focus_period])} 日的結果；綠色＝改善。')
+    else:
+        st.caption('關鍵數字為所有已選時段的系統層級合計（延滯與通過量加總、旅行時間取各時段平均）；綠色＝改善。')
 
 # ── 總覽 ──────────────────────────────────────────────────────────────────────
-with tab_overview:
+if view == VIEW_OVERVIEW:
     # ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
     summary_rows = [
         {'時段': p, '事前日數': len(bd_by_period[p]), '事後日數': len(ad_by_period[p])}
@@ -1225,7 +1244,6 @@ with tab_overview:
         with _info_col:
             if st.button('ℹ️', help='旅行時間加權計算方式', key='tt_info_btn'):
                 _show_tt_info_dialog()
-    overview_all    = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
     agg_special_raw = cl.aggregate_special_raws(special_raws, periods) if special_raws else None
     agg_special     = cl.format_special_metrics(agg_special_raw) if agg_special_raw else None
     _display_overview_table(overview_all, inc_tt, extra_entities, agg_special)
@@ -1250,7 +1268,7 @@ with tab_overview:
 # ── 時段明細：依共用選擇器顯示單一時段 × 單一指標 ────────────────────────────
 _approach_col_set = set(dl.get_approach_columns())
 
-with tab_detail:
+if view == VIEW_DETAIL:
     comp_df = all_results.get(focus_period, {}).get(focus_metric, pd.DataFrame())
     st.subheader(f'{"🛣️" if focus_metric == "旅行時間" else "📊"} {_esc_md(focus_period)}　{focus_metric}')
     if comp_df.empty:
@@ -1271,7 +1289,7 @@ with tab_detail:
         )
 
 
-with tab_daily:
+if view == VIEW_DAILY:
     # ── 每日資料分析 ──────────────────────────────────────────────────────────────
     st.caption(f'{_esc_md(focus_period)}　{focus_metric}：逐日檢視事前／事後數值；以 IQR 法在同組內找出明顯較差／較好的日期。'
                '數值為 0 或缺值的日期標為「資料異常」，不列入統計與異常判定。')
@@ -1280,7 +1298,7 @@ with tab_daily:
     _dc1, _dc2 = st.columns(2)
     daily_scope  = _dc1.radio('顯示範圍', ['事前＋事後', '只看事前', '只看事後'],
                               horizontal=True, key='daily_scope')
-    daily_k      = _dc2.slider('異常門檻（IQR 倍數）', 1.0, 3.0, 1.5, 0.5, key='daily_k',
+    daily_k      = _dc2.slider('異常門檻（IQR 倍數）', 1.0, 3.0, step=0.5, key='daily_k',
                                help='超出 Q1 − k×IQR ～ Q3 + k×IQR 範圍者視為異常；k 越小標記越多')
 
     if daily_metric == '旅行時間':
@@ -1398,7 +1416,7 @@ with tab_daily:
         if _closed & _shown:
             st.caption('趨勢圖灰底 = AI 操作紀錄中該時段狀態為「關閉」的日期。')
 
-with tab_export:
+if view == VIEW_EXPORT:
     # ── Excel 匯出 ────────────────────────────────────────────────────────────────
     include_raw = st.checkbox(
         '包含原始資料工作表',
@@ -1421,7 +1439,7 @@ with tab_export:
                 extra_summary_entities=extra_entities,
                 day_type_label='假日' if is_weekend else '平日',
                 daily_df=df if include_daily else None,
-                daily_k=daily_k,
+                daily_k=st.session_state['daily_k'],
                 daily_status_map=_period_status_map(_load_log(), periods) if include_daily else None,
             )
         ts = datetime.now().strftime('%Y%m%d_%H%M')

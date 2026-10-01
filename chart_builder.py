@@ -146,8 +146,9 @@ def make_daily_trend_chart(
     title: str,
     closed_dates: set | None = None,
 ) -> go.Figure:
-    """每日趨勢圖：事前／事後各一條線、同組平均虛線、異常日標記、AI 關閉日灰底。
-    daily 為 comparison_logic.analyze_daily 回傳的每日表（資料異常日不畫點）。"""
+    """每日趨勢圖：事前／事後以長條呈現（事前後日期常交錯，折線會跨日拉出長直線）、
+    同組平均虛線、異常日標記、AI 關閉日灰底。
+    daily 為 comparison_logic.analyze_daily 回傳的每日表（資料異常日不畫長條）。"""
     if daily['數值'].notna().sum() == 0:
         return _empty_fig(f"無資料：{title}")
 
@@ -165,9 +166,9 @@ def make_daily_trend_chart(
         g = plot_df[plot_df['組別'] == label]
         if g.empty:
             continue
-        fig.add_trace(go.Scatter(
-            x=g['日期'], y=g['數值'], mode='lines+markers', name=names[label],
-            line=dict(color=colors[label], width=2), marker=dict(size=8),
+        fig.add_trace(go.Bar(
+            x=g['日期'], y=g['數值'], name=names[label],
+            marker_color=colors[label], width=0.8 * 86_400_000,  # 日期軸寬度單位為毫秒
             customdata=g['差%'] * 100,
             hovertemplate='%{x|%Y/%m/%d (%a)}<br>%{y:,.1f}<br>與同組平均差 %{customdata:+.1f}%<extra>' + label + '</extra>',
         ))

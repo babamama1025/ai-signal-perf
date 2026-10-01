@@ -85,10 +85,14 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 
 ## 主畫面版面
 
-- 分頁上方：共用選擇器（`focus_period`、`focus_metric`、顯示全方向績效）＋ 系統層級關鍵數字（`focus_box` 容器，分析後才填入）
-- 分頁：📊 總覽 → 🔍 時段明細 → 📅 每日分析 → 📋 AI 操作紀錄 → 💾 匯出
+- 分頁以橫向 `st.radio`（key `main_view`）實作而非 `st.tabs`，因為需依目前分頁切換橫幅；只渲染目前分頁
+- 分頁上方 `focus_box`（分析後才填入）：
+  - 「時段明細」「每日分析」：共用選擇器（`focus_period`、`focus_metric`、`show_directions`）＋ 所選時段的系統層級關鍵數字
+  - 其他分頁：隱藏選擇器，關鍵數字為 `aggregate_periods` 的全時段合計
+- 未渲染的 widget 狀態會被 Streamlit 清除，故在 radio 前對 `focus_period` 等 key 自我指派以保留；`daily_k` 以 `setdefault` 初始化（slider 不可再傳 `value`，否則觸發 Session State 重複設定警告），匯出頁直接讀 `st.session_state['daily_k']`
 - 「時段明細」與「每日分析」都依共用選擇器顯示單一時段 × 單一指標；重新分析後若原選擇已不存在，會先從 session_state 清除
-- 未執行分析時仍會建立全部分頁（AI 操作紀錄可編輯），其餘分頁顯示提示後 `st.stop()`
+- 未執行分析時：AI 操作紀錄可編輯，其餘分頁顯示提示後 `st.stop()`
+- 每日趨勢圖為長條圖（事前／事後日期常交錯，折線會跨日拉出長直線）
 
 ## Streamlit 狀態管理
 
