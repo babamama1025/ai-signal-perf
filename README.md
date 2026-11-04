@@ -25,7 +25,8 @@
 ├── chart_builder.py                # Plotly 圖表工廠
 ├── export_builder.py               # openpyxl Excel 匯出
 ├── data/                           # 各場域外部資料（CSV / JSON）
-│   ├── perf_summary_4.csv          # 績效原始資料（UTF-8）
+│   ├── perf_summary_4.csv          # 績效資料（UTF-8；由 AI_sig_perf_eval 的 aisig publish 產生，勿手動修改）
+│   ├── perf_summary_4_舊口徑.csv   # 2026-11-03 切換前舊程式的版本（只供對照）
 │   ├── ai_operation_log_4.csv      # AI 操作紀錄
 │   └── date_selections_4.json      # 已儲存的事前/事後日期分配
 ├── =*績效*.xlsx                    # 測試日分類來源（選用）
@@ -33,6 +34,12 @@
 ```
 
 ## 資料格式
+
+**資料來源（2026-11-03 起）**：`perf_summary_N.csv` 由計算專案 `AI_sig_perf_eval`（本機 `C:\dev\AI_sig_perf_eval`）的
+`aisig publish` 產生（修正口徑），流程與口徑見該專案 `docs/使用說明.md` 4.0、4.9 節。**不要手動修改，也不要再用舊程式
+（`perf_analyze`、`2504-BA測試/code`）覆蓋**；改設定要在計算專案的 `sites/*.toml` 改完重算再發佈。
+`perf_summary_N_舊口徑.csv` 是切換前舊程式的版本，只供對照、不再更新。
+`ai_operation_log_N.csv`、`date_selections_N.json` 仍在本網頁編輯。
 
 `performance_summary.csv` 需包含以下固定欄位，後續欄位由程式自動偵測：
 

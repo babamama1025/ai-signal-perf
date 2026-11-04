@@ -68,6 +68,12 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 
 ## 資料格式
 
+**資料來源（2026-11-03 起）**：`perf_summary_N.csv` 由計算專案 `AI_sig_perf_eval`（本機 `C:\dev\AI_sig_perf_eval`）的
+`aisig publish` 產生（修正口徑），流程與口徑見該專案 `docs/使用說明.md` 4.0、4.9 節。**不要手動修改，也不要再用舊程式
+（`perf_analyze`、`2504-BA測試/code`）覆蓋**；改設定要在計算專案的 `sites/*.toml` 改完重算再發佈。
+`perf_summary_N_舊口徑.csv` 是切換前舊程式的版本，只供對照、不再更新。
+`ai_operation_log_N.csv`、`date_selections_N.json` 仍在本網頁編輯。
+
 `performance_summary.csv`（UTF-8）必要欄位：
 
 | 欄位 | 格式 | 說明 |
@@ -209,7 +215,7 @@ period_special = cl.format_special_metrics(special_raws[period]) if _has_valid_s
 ## 常見維護場景
 
 ### 新增場域
-1. 在 `data/` 放入 `perf_summary_N.csv`、`ai_operation_log_N.csv`
+1. 在計算專案 `AI_sig_perf_eval` 新增場域設定並設 `[site] publish_name`，以 `aisig publish` 產生 `data/perf_summary_N.csv`；另放 `ai_operation_log_N.csv`，並在 `SITE_OPTIONS`、`LOG_PATHS`、`SELECTION_PATHS` 加上新場域
 2. 確認欄位命名符合自動偵測規則（系統欄在路口欄之前、廊道欄含 `->` 或 `路徑`）
 3. 若有「特殊路口子集」需求，確認 `get_system_columns()` 能正確回傳系統總量欄
 
