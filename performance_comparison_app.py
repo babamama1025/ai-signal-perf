@@ -14,6 +14,7 @@ import data_loader as dl
 import comparison_logic as cl
 import chart_builder as cb
 import export_builder as eb
+import benefit_logic as bl
 
 # ── 場域選項 ────────────────────────────────────────────────────────────────
 SITE_OPTIONS = {
@@ -1086,6 +1087,158 @@ with st.sidebar:
         missing = [p for p in selected_periods if p not in usable_periods]
         st.caption(f'⚠️ 以下時段缺少事前或事後日期，分析結果將留白：{"、".join(_esc_md(p) for p in missing)}')
 
+# ── 全年效益估算分頁 ─────────────────────────────────────────────────────────
+_BENEFIT_NONE = '（不計）'
+_BENEFIT_FORMULA_MD = """
+**每日效益值 ΔD（車-秒/日）**：每個「日期類型 × 時段」各算一次（D̄、V̄ 為所選日期的平均每日總停等延滯、通過量）
+- **A 總延滯相減**：ΔD = D̄前 − D̄後（與 Excel 範本相同）
+- **B 平均延滯差 × 事後通過量**：ΔD = (D̄前/V̄前 − D̄後/V̄後) × V̄後（扣除事前後交通量差異）
+
+**全年效益值（車-秒/年）**
+- **1 只計實測時段**：Σ ΔD × 年天數（平日 260、假日 104）
+- **2 時數放大至全日**：Σ ΔD × 代表時數 / 時段時數 × 年天數；尖峰時段只代表自己，
+  離峰時段依長度分攤「每日計算時數 − 尖峰時數」
+
+**貨幣化**（H = 全年車-秒 / 3600）：
+時間價值 = H × 時間價值；節油（公升）= H × 怠速油耗率；油費 = 節油 × 油價；
+CO2（公噸）= 節油 × 排放率（公斤/公升）/ 1000；CO2 效益 = CO2 × 損害成本；合計 = 時間價值 + 油費 + CO2 效益
+
+**改善率** = 全年效益值 ÷ 全年基準延滯（A 基準 = D̄前；B 基準 = D̄前/V̄前 × V̄後，放大方式同效益值）；
+油耗、CO2 與停等時間成正比，三者改善率相同。
+
+四種組合（A1、A2、B1、B2）都列出，採**全年貨幣化效益最高者**。完整說明見 `doc/全年效益估算說明.md`。
+"""
+
+
+def _render_benefit_view():
+    cfg    = bl.load_params()
+    params = bl.param_values(cfg)
+    st.caption('選擇已儲存的平日與假日日期分配，估算全年節省的停等時間、油耗與 CO2。'
+               '參數在 `data/benefit_params.json`（更新日期 ' + cfg['updated'] + '）。')
+
+    by_type = {
+        t: [s['name'] for s in sorted(saved_selections, key=lambda s: s['saved_at'], reverse=True)
+            if (s['day_type'] == '週末（六、日）') == (t == bl.WEEKEND)]
+        for t in (bl.WEEKDAY, bl.WEEKEND)
+    }
+    c1, c2, c3 = st.columns(3)
+    names = {
+        bl.WEEKDAY: c1.selectbox('平日日期分配', by_type[bl.WEEKDAY] + [_BENEFIT_NONE],
+                                 key=f'benefit_wd_{selected_site}'),
+        bl.WEEKEND: c2.selectbox('假日日期分配', by_type[bl.WEEKEND] + [_BENEFIT_NONE],
+                                 key=f'benefit_we_{selected_site}'),
+    }
+    entity = c3.selectbox('計算對象', ['系統'] + extra_entities, key=f'benefit_entity_{selected_site}')
+
+    sel_map   = {s['name']: s for s in saved_selections}
+    available = set(dl.get_available_periods(df))
+    items = []
+    for dtype, name in names.items():
+        if name == _BENEFIT_NONE:
+            continue
+        for per, (b, a) in bl.preset_dates(sel_map[name], weekend=(dtype == bl.WEEKEND)).items():
+            if per in available:
+                items.append({'日期類型': dtype, '時段': per, '納入': bool(b and a),
+                              '尖峰': bl.is_peak(per, cfg['peak_windows']),
+                              '事前日數': len(b), '事後日數': len(a), '_dates': (b, a)})
+    if not items:
+        st.info('請至少選擇一筆日期分配。')
+        return
+
+    st.markdown(_esc_md(
+        '**時段設定**\n'
+        '- **納入**：勾選才計入全年效益；同一日期類型的時段不可重疊（如 07:00~09:00 與 06:30~20:30），'
+        '否則延滯會重複計算。\n'
+        '- **尖峰**：只影響 A2、B2（放大至 06:00~22:00 共 16 小時）。尖峰時段只算自己的時數；'
+        '離峰時段依長度分攤「16 − 尖峰時數」。全部勾尖峰時不放大，其餘時間不計（偏保守）。'
+        '預設：時段一半以上落在 07~09 或 17~19 即為尖峰。'
+    ))
+    edited = st.data_editor(
+        pd.DataFrame([{k: v for k, v in it.items() if k != '_dates'} for it in items]),
+        disabled=['日期類型', '時段', '事前日數', '事後日數'],
+        hide_index=True, use_container_width=True,
+        key=f'benefit_editor_{selected_site}_{names[bl.WEEKDAY]}_{names[bl.WEEKEND]}',
+    )
+
+    detail_items, skipped = [], []
+    for it, row in zip(items, edited.to_dict('records')):
+        if not row['納入']:
+            continue
+        b, a = it['_dates']
+        if not (b and a):
+            skipped.append(f"{it['日期類型']} {it['時段']}（缺事前或事後日期）")
+            continue
+        m = bl.period_means(df, it['時段'], b, a, entity)
+        if any(pd.isna(v) or v == 0 for v in m.values()):
+            skipped.append(f"{it['日期類型']} {it['時段']}（{entity} 無延滯或通過量資料）")
+            continue
+        detail_items.append({'日期類型': it['日期類型'], '時段': it['時段'], '尖峰': bool(row['尖峰']),
+                             **m, '事前日數': len(b), '事後日數': len(a)})
+    if skipped:
+        st.warning('以下時段不計入：' + '、'.join(_esc_md(s) for s in skipped))
+    for dtype in (bl.WEEKDAY, bl.WEEKEND):
+        pairs = bl.overlapping_pairs([d['時段'] for d in detail_items if d['日期類型'] == dtype])
+        if pairs:
+            st.error(f'{dtype}時段重疊，延滯會重複計算，請取消其中之一：'
+                     + '、'.join(_esc_md(f'{x} 與 {y}') for x, y in pairs))
+            return
+    if not detail_items:
+        st.info('沒有可計算的時段。')
+        return
+
+    detail      = bl.build_detail(detail_items, params)
+    table, best = bl.summarize(detail, params)
+    r = table.loc[best]
+
+    st.subheader('🌱 全年效益（採用 ' + bl.combo_label(best[0], best[1]) + '）')
+    _pct = None if pd.isna(r['改善率']) else (
+        f"{r['改善率'] * 100:+.1f}% " + ('改善' if r['改善率'] >= 0 else '惡化'))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric('節省停等時間', f"{r['全年效益值(車-小時)']:,.0f} 車-小時/年", _pct)
+    k2.metric('節省油耗', f"{r['油耗節省(公升)']:,.0f} 公升/年", _pct)
+    k3.metric('減少 CO2', f"{r['CO2減少量(公噸)']:,.1f} 公噸/年", _pct)
+    k4.metric('全年貨幣化效益', f"{r['全年貨幣化效益(元)'] / 1e4:,.0f} 萬元/年")
+    st.caption('採用四種組合中全年貨幣化效益最高者；各組合結果見下表。'
+               '改善率 = 節省量 ÷ 原時制下的全年停等延滯（A 用事前總延滯，B 用事前每車延滯 × 事後通過量）；'
+               '油耗、CO2 都與停等時間成正比，所以三者改善率相同。')
+
+    st.markdown('**四種計算組合**')
+    _fmt = {c: '{:,.0f}' for c in table.columns if c != '組合'}
+    _fmt.update({'全年效益值(車-小時)': '{:,.1f}', '油耗節省(公升)': '{:,.1f}', 'CO2減少量(公噸)': '{:,.2f}',
+                 '改善率': '{:+.1%}'})
+    st.dataframe(
+        table.style.format(_fmt).apply(
+            lambda s: ['background-color: #C6EFCE' if s.name == best else ''] * len(s), axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown(f'**各時段明細**（{entity}）')
+    show = detail.rename(columns={'D_before': '事前總延滯', 'D_after': '事後總延滯',
+                                  'V_before': '事前通過量', 'V_after': '事後通過量'})
+    show['尖峰'] = show['尖峰'].map({True: '是', False: '否'})
+    _dfmt = {c: '{:,.0f}' for c in show.columns
+             if c.startswith(('事前總', '事後總', '事前通', '事後通', 'ΔD', '基準', '年車秒', '年基準'))}
+    _dfmt.update({'時數': '{:.1f}', '代表時數': '{:.1f}'})
+    st.dataframe(show.style.format(_dfmt), use_container_width=True, hide_index=True)
+    st.caption('單位：總延滯、ΔD、基準為車-秒/日；通過量為輛/日；年車秒為該時段對全年效益值的貢獻、'
+               '年基準為改善率的分母（車-秒/年）。')
+
+    with st.expander('📐 計算方式與參數', expanded=False):
+        st.markdown(_BENEFIT_FORMULA_MD)
+        st.dataframe(pd.DataFrame([{'參數': v['label'], '數值': v['value'], '單位': v['unit'], '出處': v['source']}
+                                   for v in cfg['params'].values()]),
+                     use_container_width=True, hide_index=True)
+
+    meta = {'場域': selected_site, '平日日期分配': names[bl.WEEKDAY], '假日日期分配': names[bl.WEEKEND],
+            '計算對象': entity, '產製時間': datetime.now().strftime('%Y/%m/%d %H:%M')}
+    st.download_button(
+        '⬇️ 下載全年效益 Excel（含公式）',
+        data=eb.build_benefit_xlsx(detail, best, cfg, meta),
+        file_name=f"全年效益_{selected_site}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
 # ── 主畫面 ──────────────────────────────────────────────────────────────────
 st.title('🚦 AI 號誌事前後分析系統')
 st.subheader(f'場域：{selected_site}')
@@ -1101,9 +1254,9 @@ for _k in ('focus_period', 'focus_metric', 'show_directions', 'daily_scope', 'da
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 
-VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_LOG, VIEW_EXPORT = (
-    '📊 總覽', '🔍 時段明細', '📅 每日分析', '📋 AI 操作紀錄', '💾 匯出')
-view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_LOG, VIEW_EXPORT],
+VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_LOG, VIEW_EXPORT = (
+    '📊 總覽', '🔍 時段明細', '📅 每日分析', '🌱 全年效益', '📋 AI 操作紀錄', '💾 匯出')
+view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_LOG, VIEW_EXPORT],
                 horizontal=True, key='main_view', label_visibility='collapsed')
 
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
@@ -1147,6 +1300,10 @@ if view == VIEW_LOG:
     if msg := st.session_state.pop('_log_msg', None):
         st.success(msg)
 
+# ── 全年效益估算（直接讀已儲存的平日／假日日期分配，不需先執行分析）──────────────
+if view == VIEW_BENEFIT:
+    _render_benefit_view()
+
 if st.session_state['analysis_results'] is None:
     if view == VIEW_OVERVIEW:
         st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
@@ -1159,7 +1316,7 @@ if st.session_state['analysis_results'] is None:
 4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
-    elif view != VIEW_LOG:
+    elif view not in (VIEW_LOG, VIEW_BENEFIT):
         st.info('請先在左側設定分析條件並點擊「執行分析」。')
     st.stop()
 

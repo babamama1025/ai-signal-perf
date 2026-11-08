@@ -644,3 +644,158 @@ def _write_los(cell, delay):
         cell.font = _LOS_FONT[los]
     else:
         cell.font = FONT_NORMAL
+
+
+# ── 全年效益估算（含 Excel 公式，同仁可直接檢查計算過程）────────────────────────
+
+_BENEFIT_DETAIL_COLS = [
+    # (表頭, 明細欄名 或 None=公式, 數值格式)
+    ('日期類型', '日期類型', None), ('時段', '時段', None), ('尖峰', '尖峰', None),
+    ('時數', '時數', '0.0'), ('代表時數', '代表時數', '0.0'), ('年天數', '年天數', '0'),
+    ('事前日數', '事前日數', '0'), ('事後日數', '事後日數', '0'),
+    ('事前總停等延滯 D前(車-秒/日)', 'D_before', '#,##0.0'), ('事後總停等延滯 D後(車-秒/日)', 'D_after', '#,##0.0'),
+    ('事前通過量 V前(輛/日)', 'V_before', '#,##0.0'), ('事後通過量 V後(輛/日)', 'V_after', '#,##0.0'),
+    ('ΔD_A 總延滯相減 =D前−D後', None, '#,##0.0'),
+    ('ΔD_B 平均延滯差×事後通過量 =(D前/V前−D後/V後)×V後', None, '#,##0.0'),
+    ('全年車-秒 A1 =ΔD_A×年天數', None, '#,##0'),
+    ('全年車-秒 A2 =ΔD_A×代表時數/時數×年天數', None, '#,##0'),
+    ('全年車-秒 B1 =ΔD_B×年天數', None, '#,##0'),
+    ('全年車-秒 B2 =ΔD_B×代表時數/時數×年天數', None, '#,##0'),
+    ('基準_A 事前總延滯 =D前', None, '#,##0.0'),
+    ('基準_B 事前每車延滯×事後通過量 =D前/V前×V後', None, '#,##0.0'),
+    ('全年基準 A1 =基準_A×年天數', None, '#,##0'),
+    ('全年基準 A2 =基準_A×代表時數/時數×年天數', None, '#,##0'),
+    ('全年基準 B1 =基準_B×年天數', None, '#,##0'),
+    ('全年基準 B2 =基準_B×代表時數/時數×年天數', None, '#,##0'),
+]
+
+# (列名, 公式樣板, 數值格式)；{tot}/{base} = 該組合全年車-秒／全年基準的加總，{p[key]} = 參數儲存格，{r[n]} = 本欄第 n 列
+_BENEFIT_STEPS = [
+    ('全年效益值(車-秒)',   '={tot}',                        '#,##0'),
+    ('全年效益值(車-小時)', '={r[0]}/3600',                  '#,##0.0'),
+    ('時間價值節省(元)',    '={r[1]}*{p[time_value]}',       '#,##0'),
+    ('油耗節省(公升)',      '={r[1]}*{p[idle_fuel_rate]}',   '#,##0.0'),
+    ('油耗節省(元)',        '={r[3]}*{p[fuel_price]}',       '#,##0'),
+    ('CO2減少量(公噸)',     '={r[3]}*{p[co2_per_litre]}/1000', '#,##0.00'),
+    ('CO2貨幣化效益(元)',   '={r[5]}*{p[co2_cost]}',         '#,##0'),
+    ('全年貨幣化效益(元)',  '={r[2]}+{r[4]}+{r[6]}',         '#,##0'),
+    ('改善率(停等時間、油耗、CO2 相同)', '={tot}/{base}',     '0.0%'),
+]
+
+
+def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[str, str]) -> io.BytesIO:
+    """全年效益估算報告：全年效益（四種組合）→ 各時段 → 參數。數值皆以 Excel 公式計算。"""
+    from benefit_logic import COMBOS, combo_label
+    wb = Workbook()
+    ws_sum = wb.active
+    ws_sum.title = '全年效益'
+    ws_det = wb.create_sheet('各時段')
+    ws_par = wb.create_sheet('參數')
+
+    # 參數
+    p_cell = {}
+    for c, h in enumerate(['參數', '數值', '單位', '出處'], 1):
+        _hdr(ws_par.cell(1, c, h))
+    for i, (key, v) in enumerate(cfg['params'].items(), 2):
+        ws_par.cell(i, 1, v['label']).font = FONT_NORMAL
+        ws_par.cell(i, 2, v['value']).font = FONT_BOLD
+        ws_par.cell(i, 3, v['unit']).font = FONT_NORMAL
+        ws_par.cell(i, 4, v['source']).font = FONT_NORMAL
+        p_cell[key] = f"參數!$B${i}"
+    ws_par.cell(len(cfg['params']) + 3, 1, f"參數更新日期：{cfg['updated']}").font = FONT_NORMAL
+    for col, w in zip('ABCD', (28, 10, 12, 100)):
+        ws_par.column_dimensions[col].width = w
+
+    # 各時段
+    for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1):
+        _hdr(ws_det.cell(1, c, h))
+        ws_det.column_dimensions[get_column_letter(c)].width = 16
+    L = {h.split(' ')[0]: get_column_letter(c) for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1)}
+    n = len(detail)
+    for i, rec in enumerate(detail.to_dict('records'), 2):
+        f = {k: f'{L[k]}{i}' for k in L}
+        formulas = {
+            'ΔD_A': f"={f['事前總停等延滯']}-{f['事後總停等延滯']}",
+            'ΔD_B': f"=({f['事前總停等延滯']}/{f['事前通過量']}-{f['事後總停等延滯']}/{f['事後通過量']})*{f['事後通過量']}",
+            '基準_A': f"={f['事前總停等延滯']}",
+            '基準_B': f"={f['事前總停等延滯']}/{f['事前通過量']}*{f['事後通過量']}",
+        }
+        for c, (h, src, fmt) in enumerate(_BENEFIT_DETAIL_COLS, 1):
+            if src is not None:
+                val = rec[src]
+                val = ('是' if val else '否') if src == '尖峰' else val
+            elif h.startswith(('ΔD_', '基準_')):
+                val = formulas[h.split(' ')[0]]
+            else:
+                combo = h.split(' ')[1]
+                daily = 'ΔD_' if h.startswith('全年車-秒') else '基準_'
+                dd = f"{L[daily + combo[0]]}{i}"
+                scale = '' if combo[1] == '1' else f"*{f['代表時數']}/{f['時數']}"
+                val = f"={dd}{scale}*{f['年天數']}"
+            cell = ws_det.cell(i, c, val)
+            cell.font = FONT_NORMAL
+            if fmt:
+                cell.number_format = fmt
+    combo_cols = {h.split(' ')[1]: get_column_letter(c)
+                  for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1) if h.startswith('全年車-秒')}
+    base_cols = {h.split(' ')[1]: get_column_letter(c)
+                 for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1) if h.startswith('全年基準')}
+    ws_det.freeze_panes = 'C2'
+
+    # 全年效益
+    ws_sum['A1'] = '全年效益估算（停等延滯節省 → 時間價值、節油、減碳）'
+    ws_sum['A1'].font = Font(name='微軟正黑體', bold=True, size=14)
+    row = 2
+    for k, v in meta.items():
+        ws_sum.cell(row, 1, f'{k}：{v}').font = FONT_NORMAL
+        row += 1
+    row += 1
+    top = row
+    _hdr(ws_sum.cell(top, 1, '項目'))
+    for j, (d, s) in enumerate(COMBOS, 2):
+        code = f'{d}{s}'
+        cell = ws_sum.cell(top, j, combo_label(d, s) + ('　★採用' if code == best else ''))
+        _hdr(cell)
+        cell.alignment = Alignment(wrap_text=True, horizontal='center', vertical='center')
+        ws_sum.column_dimensions[get_column_letter(j)].width = 24
+    ws_sum.row_dimensions[top].height = 48
+    for k, (label, _, _) in enumerate(_BENEFIT_STEPS):
+        ws_sum.cell(top + 1 + k, 1, label).font = FONT_BOLD
+    for j, (d, s) in enumerate(COMBOS, 2):
+        col = get_column_letter(j)
+        r = [f'{col}{top + 1 + k}' for k in range(len(_BENEFIT_STEPS))]
+        tot = f"SUM(各時段!{combo_cols[d + s]}2:{combo_cols[d + s]}{n + 1})" if n else '0'
+        base = f"SUM(各時段!{base_cols[d + s]}2:{base_cols[d + s]}{n + 1})" if n else '1'
+        for k, (_, tmpl, fmt) in enumerate(_BENEFIT_STEPS):
+            cell = ws_sum.cell(top + 1 + k, j, tmpl.format(tot=tot, base=base, p=p_cell, r=r))
+            cell.number_format = fmt
+            cell.font = FONT_BOLD if f'{d}{s}' == best else FONT_NORMAL
+            if f'{d}{s}' == best:
+                cell.fill = FILL_GREEN
+    ws_sum.column_dimensions['A'].width = 22
+    notes = [
+        '說明：',
+        'ΔD（每日效益值，車-秒/日）：A = 事前平均總停等延滯 − 事後平均總停等延滯；'
+        'B = (事前平均每車延滯 − 事後平均每車延滯) × 事後平均通過量（扣除事前後交通量差異）。',
+        '全年化：1 = 只計實測時段 × 年天數；2 = 尖峰時段只代表自己，離峰時段分攤「每日計算時數 − 尖峰時數」後 × 年天數。',
+        '四種組合皆列出，報告採全年貨幣化效益最高者（★）。效益值為負代表該組合下 AI 號誌延滯增加。',
+        '改善率 = 全年效益值 ÷ 全年基準（A 基準 = 事前總延滯；B 基準 = 事前每車延滯 × 事後通過量，同樣放大到全年）；'
+        '油耗、CO2 與停等時間成正比，三者改善率相同。',
+        '停等延滯為大車＋小車實際車數（未換算小客車當量、不含機車），油耗以小客車怠速油耗率估算。',
+        '公式與參數出處詳見「各時段」「參數」工作表，及 ai-signal-perf/doc/全年效益估算說明.md。',
+    ]
+    row = top + len(_BENEFIT_STEPS) + 2
+    for t in notes:
+        ws_sum.cell(row, 1, t).font = FONT_NORMAL
+        row += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def _hdr(cell):
+    cell.font = FONT_WHITE_BOLD
+    cell.fill = FILL_HEADER
+    cell.alignment = Alignment(wrap_text=True, vertical='center')

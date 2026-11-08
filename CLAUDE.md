@@ -14,8 +14,17 @@ performance_comparison_app.py   主程式（Streamlit UI、狀態管理）
   ├── data_loader.py             CSV 讀取、欄位結構自動偵測（模組層快取）
   ├── comparison_logic.py        統計計算、改善率、特殊路口延滯
   ├── chart_builder.py           Plotly 圖表工廠（純函式，不持有狀態）
-  └── export_builder.py          openpyxl Excel 匯出（含樣式）
+  ├── export_builder.py          openpyxl Excel 匯出（含樣式）
+  └── benefit_logic.py           全年效益估算（時間價值、節油、減碳），參數在 data/benefit_params.json
 ```
+
+### benefit_logic.py（「🌱 全年效益」分頁）
+
+- 公式、參數出處、驗證與限制見 **`doc/全年效益估算說明.md`**；改公式或參數時同步更新該文件
+- 直接讀已儲存的平日＋假日日期分配（`date_selections_N.json`），**不需先執行分析**，所以分頁在 `st.stop()` 之前渲染
+- 每日效益值 A（總延滯相減）／B（平均延滯差 × 事後通過量）× 全年化 1（只計實測時段）／2（時數放大至全日），
+  四種組合都算，採全年貨幣化效益最高者（使用者決定，2026-11-06）
+- `build_benefit_xlsx` 匯出的數值都是 Excel 公式；`tests/test_benefit_logic.py` 以 Excel 範本「大竹二期」驗算
 
 ### data_loader.py
 
