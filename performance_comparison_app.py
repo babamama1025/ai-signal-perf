@@ -918,6 +918,8 @@ with st.sidebar:
         new_date_count = new_rows['日期'].nunique() if not new_rows.empty else 0
         if not new_rows.empty:
             base_df = pd.concat([base_df, new_rows], ignore_index=True)
+            # 補入的日期可能落在既有日期之間（如資料後來才補齊的 9/8），依日期排回原位
+            base_df = base_df.sort_values('日期', kind='stable', ignore_index=True)
 
         st.session_state['day_type_radio'] = preset['day_type']
         # 同步更新 day_type tracker，避免 rerun 時觸發「切換日期類型→重設時段」的保護邏輯
