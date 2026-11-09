@@ -10,7 +10,7 @@ import benefit_logic as bl  # noqa: E402
 # 節能減碳效益計算表「大竹二期」工作表的參數（油價為 2023Q2 桃園均價）
 EXCEL_PARAMS = {
     'days_weekday': 260, 'days_weekend': 104, 'covered_hours': 16,
-    'time_value': 5.93 * 60, 'idle_fuel_rate': 1.54, 'fuel_price': 30.49,
+    'time_value': 5.93 * 60, 'occupancy': 2.3, 'idle_fuel_rate': 1.54, 'fuel_price': 30.49,
     'co2_per_litre': 2.263, 'co2_cost': 585,
 }
 
@@ -31,6 +31,7 @@ def test_reproduces_excel_dazhu_phase2():
     r = table.loc['A1']
     assert r['全年效益值(車-秒)'] == 133082664
     assert r['全年效益值(車-小時)'] == pytest.approx(36967.4, abs=0.05)
+    assert r['節省停等時間(人-分鐘)'] == pytest.approx(36967.4 * 2.3 * 60, rel=1e-5)
     assert r['時間價值節省(元)'] == pytest.approx(13153003, abs=1)
     assert r['油耗節省(公升)'] == pytest.approx(56929.8, abs=0.05)
     assert r['油耗節省(元)'] == pytest.approx(1735790, abs=1)

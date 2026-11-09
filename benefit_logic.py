@@ -164,13 +164,14 @@ def build_detail(items: list[dict], params: dict[str, float]) -> pd.DataFrame:
 
 
 def monetize(vehicle_seconds: float, params: dict[str, float]) -> dict[str, float]:
-    """全年車-秒 → 車-小時、時間價值、節油、減碳、合計（與 Excel 範本同順序）。"""
+    """全年車-秒 → 車-小時、人-分鐘、時間價值、節油、減碳、合計（除人-分鐘外與 Excel 範本同順序）。"""
     hours = vehicle_seconds / 3600
     fuel = hours * params['idle_fuel_rate']
     co2 = fuel * params['co2_per_litre'] / 1000
     out = {
         '全年效益值(車-秒)':    vehicle_seconds,
         '全年效益值(車-小時)':  hours,
+        '節省停等時間(人-分鐘)': hours * params['occupancy'] * 60,
         '時間價值節省(元)':     hours * params['time_value'],
         '油耗節省(公升)':       fuel,
         '油耗節省(元)':         fuel * params['fuel_price'],

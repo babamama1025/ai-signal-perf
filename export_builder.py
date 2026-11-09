@@ -673,23 +673,29 @@ _BENEFIT_DETAIL_COLS = [
 _BENEFIT_STEPS = [
     ('全年效益值(車-秒)',   '={tot}',                        '#,##0'),
     ('全年效益值(車-小時)', '={r[0]}/3600',                  '#,##0.0'),
+    ('節省停等時間(人-分鐘)', '={r[1]}*{p[occupancy]}*60',   '#,##0'),
     ('時間價值節省(元)',    '={r[1]}*{p[time_value]}',       '#,##0'),
     ('油耗節省(公升)',      '={r[1]}*{p[idle_fuel_rate]}',   '#,##0.0'),
-    ('油耗節省(元)',        '={r[3]}*{p[fuel_price]}',       '#,##0'),
-    ('CO2減少量(公噸)',     '={r[3]}*{p[co2_per_litre]}/1000', '#,##0.00'),
-    ('CO2貨幣化效益(元)',   '={r[5]}*{p[co2_cost]}',         '#,##0'),
-    ('全年貨幣化效益(元)',  '={r[2]}+{r[4]}+{r[6]}',         '#,##0'),
+    ('油耗節省(元)',        '={r[4]}*{p[fuel_price]}',       '#,##0'),
+    ('CO2減少量(公噸)',     '={r[4]}*{p[co2_per_litre]}/1000', '#,##0.00'),
+    ('CO2貨幣化效益(元)',   '={r[6]}*{p[co2_cost]}',         '#,##0'),
+    ('全年貨幣化效益(元)',  '={r[3]}+{r[5]}+{r[7]}',         '#,##0'),
     ('改善率(停等時間、油耗、CO2 相同)', '={tot}/{base}',     '0.0%'),
 ]
 
 
-def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[str, str]) -> io.BytesIO:
-    """全年效益估算報告：全年效益（四種組合）→ 各時段 → 參數。數值皆以 Excel 公式計算。"""
+def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[str, str],
+                       used_dates: dict[tuple[str, str], tuple[list, list]]) -> io.BytesIO:
+    """全年效益估算報告：全年效益（四種組合）→ 各時段 → 使用日期 → 參數。數值皆以 Excel 公式計算。
+
+    used_dates：{(日期類型, 時段): (事前日期, 事後日期)}，列出各時段計算所用的日期。
+    """
     from benefit_logic import COMBOS, combo_label
     wb = Workbook()
     ws_sum = wb.active
     ws_sum.title = '全年效益'
     ws_det = wb.create_sheet('各時段')
+    ws_dat = wb.create_sheet('使用日期')
     ws_par = wb.create_sheet('參數')
 
     # 參數
@@ -742,6 +748,22 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
                  for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1) if h.startswith('全年基準')}
     ws_det.freeze_panes = 'C2'
 
+    # 使用日期（每列一個日期；平均值取這些日期中有資料者）
+    for c, h in enumerate(['日期類型', '時段', '事前/事後', '日期', '星期'], 1):
+        _hdr(ws_dat.cell(1, c, h))
+    i = 2
+    for rec in detail.to_dict('records'):
+        for label, dates in zip(('事前', '事後'), used_dates[(rec['日期類型'], rec['時段'])]):
+            for d in sorted(dates):
+                for c, v in enumerate([rec['日期類型'], rec['時段'], label, d.strftime('%Y/%m/%d'),
+                                       '一二三四五六日'[d.weekday()]], 1):
+                    ws_dat.cell(i, c, v).font = FONT_NORMAL
+                i += 1
+    for col, w in zip('ABCDE', (10, 14, 10, 12, 6)):
+        ws_dat.column_dimensions[col].width = w
+    ws_dat.freeze_panes = 'A2'
+    ws_dat.auto_filter.ref = f'A1:E{max(i - 1, 1)}'
+
     # 全年效益
     ws_sum['A1'] = '全年效益估算（停等延滯節省 → 時間價值、節油、減碳）'
     ws_sum['A1'].font = Font(name='微軟正黑體', bold=True, size=14)
@@ -781,8 +803,9 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
         '四種組合皆列出，報告採全年貨幣化效益最高者（★）。效益值為負代表該組合下 AI 號誌延滯增加。',
         '改善率 = 全年效益值 ÷ 全年基準（A 基準 = 事前總延滯；B 基準 = 事前每車延滯 × 事後通過量，同樣放大到全年）；'
         '油耗、CO2 與停等時間成正比，三者改善率相同。',
+        '人-分鐘 = 車-小時 × 小客車都會平均乘載率 × 60（每車皆以小客車乘載率計）。',
         '停等延滯為大車＋小車實際車數（未換算小客車當量、不含機車），油耗以小客車怠速油耗率估算。',
-        '公式與參數出處詳見「各時段」「參數」工作表，及 ai-signal-perf/doc/全年效益估算說明.md。',
+        '各時段使用的事前／事後日期見「使用日期」工作表；公式與參數出處詳見「各時段」「參數」工作表，及 ai-signal-perf/doc/全年效益估算說明.md。',
     ]
     row = top + len(_BENEFIT_STEPS) + 2
     for t in notes:

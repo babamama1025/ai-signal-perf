@@ -1101,6 +1101,8 @@ _BENEFIT_FORMULA_MD = """
 - **2 時數放大至全日**：Σ ΔD × 代表時數 / 時段時數 × 年天數；尖峰時段只代表自己，
   離峰時段依長度分攤「每日計算時數 − 尖峰時數」
 
+**人-分鐘** = H × 小客車都會平均乘載率 × 60（H = 全年車-秒 / 3600；每車都以小客車乘載率計）
+
 **貨幣化**（H = 全年車-秒 / 3600）：
 時間價值 = H × 時間價值；節油（公升）= H × 怠速油耗率；油費 = 節油 × 油價；
 CO2（公噸）= 節油 × 排放率（公斤/公升）/ 1000；CO2 效益 = CO2 × 損害成本；合計 = 時間價值 + 油費 + CO2 效益
@@ -1162,7 +1164,7 @@ def _render_benefit_view():
         key=f'benefit_editor_{selected_site}_{names[bl.WEEKDAY]}_{names[bl.WEEKEND]}',
     )
 
-    detail_items, skipped = [], []
+    detail_items, skipped, used_dates = [], [], {}
     for it, row in zip(items, edited.to_dict('records')):
         if not row['納入']:
             continue
@@ -1176,6 +1178,7 @@ def _render_benefit_view():
             continue
         detail_items.append({'日期類型': it['日期類型'], '時段': it['時段'], '尖峰': bool(row['尖峰']),
                              **m, '事前日數': len(b), '事後日數': len(a)})
+        used_dates[(it['日期類型'], it['時段'])] = (b, a)
     if skipped:
         st.warning('以下時段不計入：' + '、'.join(_esc_md(s) for s in skipped))
     for dtype in (bl.WEEKDAY, bl.WEEKEND):
@@ -1197,6 +1200,7 @@ def _render_benefit_view():
         f"{r['改善率'] * 100:+.1f}% " + ('改善' if r['改善率'] >= 0 else '惡化'))
     k1, k2, k3, k4 = st.columns(4)
     k1.metric('節省停等時間', f"{r['全年效益值(車-小時)']:,.0f} 車-小時/年", _pct)
+    k1.caption(f"≈ {r['節省停等時間(人-分鐘)'] / 1e4:,.0f} 萬 人-分鐘/年（× 乘載率 {params['occupancy']} 人/車 × 60）")
     k2.metric('節省油耗', f"{r['油耗節省(公升)']:,.0f} 公升/年", _pct)
     k3.metric('減少 CO2', f"{r['CO2減少量(公噸)']:,.1f} 公噸/年", _pct)
     k4.metric('全年貨幣化效益', f"{r['全年貨幣化效益(元)'] / 1e4:,.0f} 萬元/年")
@@ -1235,7 +1239,7 @@ def _render_benefit_view():
             '計算對象': entity, '產製時間': datetime.now().strftime('%Y/%m/%d %H:%M')}
     st.download_button(
         '⬇️ 下載全年效益 Excel（含公式）',
-        data=eb.build_benefit_xlsx(detail, best, cfg, meta),
+        data=eb.build_benefit_xlsx(detail, best, cfg, meta, used_dates),
         file_name=f"全年效益_{selected_site}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
