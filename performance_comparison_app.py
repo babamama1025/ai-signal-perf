@@ -1210,7 +1210,7 @@ def _render_benefit_view():
                  '改善率': '{:+.1%}'})
     st.dataframe(
         table.style.format(_fmt).apply(
-            lambda s: ['background-color: #C6EFCE' if s.name == best else ''] * len(s), axis=1),
+            lambda s: ['background-color: #C6EFCE; color: #006100; font-weight: bold' if s.name == best else ''] * len(s), axis=1),
         use_container_width=True, hide_index=True,
     )
 
