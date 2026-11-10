@@ -28,7 +28,9 @@
 │   ├── perf_summary_4.csv          # 績效資料（UTF-8；由 AI_sig_perf_eval 的 aisig publish 產生，勿手動修改）
 │   ├── perf_summary_4_舊口徑.csv   # 2026-11-03 切換前舊程式的版本（只供對照）
 │   ├── ai_operation_log_4.csv      # AI 操作紀錄
-│   └── date_selections_4.json      # 已儲存的事前/事後日期分配
+│   ├── date_selections_4.json      # 已儲存的事前/事後日期分配
+│   ├── data_quality_4.csv          # 資料品質註記（aisig publish 產生）
+│   └── degradation_daily_4.csv     # 每日降階統計（aisig publish 產生）
 ├── =*績效*.xlsx                    # 測試日分類來源（選用）
 └── run.bat                         # Windows 一鍵啟動腳本
 ```

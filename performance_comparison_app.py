@@ -67,6 +67,12 @@ QUALITY_PATHS = {
     '桃園三期(高鐵)': 'data_quality_3.csv',
 }
 
+# 各場域的每日降階統計（計算專案 aisig publish 產生）
+DEGRADATION_PATHS = {
+    '桃園四期(大湳)': 'degradation_daily_4.csv',
+    '桃園三期(高鐵)': 'degradation_daily_3.csv',
+}
+
 # ── 旅行時間指標說明（popover 用）────────────────────────────────────────────
 _TT_METRIC_INFO_MD = """
 #### 一、平均旅行時間
@@ -566,6 +572,7 @@ CSV_PATH       = DATA_DIR / _selected_data_file
 LOG_PATH       = DATA_DIR / LOG_PATHS[selected_site]
 SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
 QUALITY_PATH   = DATA_DIR / QUALITY_PATHS[selected_site]
+DEGRADATION_PATH = DATA_DIR / DEGRADATION_PATHS[selected_site]
 
 if _upload_content is not None:
     try:
@@ -1144,6 +1151,46 @@ CO2（公噸）= 節油 × 排放率（公斤/公升）/ 1000；CO2 效益 = CO2
 """
 
 
+_DEG_HELP = (
+    '來源：平台降階紀錄（sysErrRecord），由計算專案 `aisig publish` 產生。'
+    '同一事件會在子系統每台控制器各記一筆，依開始時間排序後，與前一筆相隔不到 5 秒的視為同一事件'
+    '（同時發生、不同路口的事件也會併成一次）。'
+    '不納入：原因含「因時相轉換暫停運作」「其他閃光」的紀錄，以及開始與結束不在同一天的跨日紀錄。\n\n'
+    '- **降階次數**：當日開始的降階事件數。\n'
+    '- **小時制降階次數**：當日有降階事件開始的小時數，同一小時內不論幾次只計 1 次。\n'
+    '- **降階分鐘**：當日處於降階狀態的總分鐘數，同時發生的降階不重複計。'
+)
+
+
+def _render_degradation_view():
+    d = dl.load_degradation(DEGRADATION_PATH)
+    if d.empty:
+        st.info(f'尚無降階統計（`data/{DEGRADATION_PATH.name}`，由計算專案 aisig publish 產生）。')
+        return
+    st.markdown(_esc_md(_DEG_HELP))
+    lo, hi = d['日期'].min().date(), d['日期'].max().date()
+    rng = st.date_input('日期範圍', value=(lo, hi), min_value=lo, max_value=hi, key=f'deg_range_{selected_site}')
+    if not (isinstance(rng, tuple) and len(rng) == 2):
+        st.info('請選擇起訖日期。')
+        return
+    d = d[(d['日期'].dt.date >= rng[0]) & (d['日期'].dt.date <= rng[1])]
+    n = len(d)
+    c = st.columns(4)
+    c[0].metric('天數', f'{n}', f'有降階 {(d["降階次數"] > 0).sum()} 天', delta_color='off')
+    c[1].metric('降階次數', f'{d["降階次數"].sum()}', f'日均 {d["降階次數"].mean():.2f}', delta_color='off')
+    c[2].metric('小時制降階次數', f'{d["小時制降階次數"].sum()}', f'日均 {d["小時制降階次數"].mean():.2f}',
+                delta_color='off')
+    c[3].metric('降階總時長', f'{d["降階分鐘"].sum() / 60:,.1f} 小時', f'日均 {d["降階分鐘"].mean():.1f} 分鐘',
+                delta_color='off')
+    st.plotly_chart(cb.make_degradation_count_chart(d), use_container_width=True)
+    st.plotly_chart(cb.make_degradation_minutes_chart(d), use_container_width=True)
+    st.markdown('**每月彙總**')
+    st.dataframe(dl.degradation_monthly(d), hide_index=True, use_container_width=True)
+    st.markdown('**每日明細**')
+    st.dataframe(d.assign(日期=d['日期'].dt.strftime('%Y/%m/%d')), hide_index=True, use_container_width=True,
+                 column_config={'降階分鐘': st.column_config.NumberColumn(format='%.1f')})
+
+
 def _render_benefit_view():
     cfg    = bl.load_params()
     params = bl.param_values(cfg)
@@ -1303,9 +1350,9 @@ for _k in ('focus_period', 'focus_metric', 'show_directions', 'daily_scope', 'da
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 
-VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_LOG, VIEW_EXPORT = (
-    '📊 總覽', '🔍 時段明細', '📅 每日分析', '🌱 全年效益', '📋 AI 操作紀錄', '💾 匯出')
-view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_LOG, VIEW_EXPORT],
+VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_DEGRADE, VIEW_LOG, VIEW_EXPORT = (
+    '📊 總覽', '🔍 時段明細', '📅 每日分析', '🌱 全年效益', '📉 降階紀錄', '📋 AI 操作紀錄', '💾 匯出')
+view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_DEGRADE, VIEW_LOG, VIEW_EXPORT],
                 horizontal=True, key='main_view', label_visibility='collapsed')
 
 # ── AI 操作紀錄編輯器 ─────────────────────────────────────────────────────────
@@ -1353,6 +1400,10 @@ if view == VIEW_LOG:
 if view == VIEW_BENEFIT:
     _render_benefit_view()
 
+# ── 降階紀錄（讀計算專案發佈的每日降階統計，不需先執行分析）──────────────────────
+if view == VIEW_DEGRADE:
+    _render_degradation_view()
+
 if st.session_state['analysis_results'] is None:
     if view == VIEW_OVERVIEW:
         st.info('請在左側設定分析條件後，點擊「執行分析」按鈕。')
@@ -1365,7 +1416,7 @@ if st.session_state['analysis_results'] is None:
 4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
-    elif view not in (VIEW_LOG, VIEW_BENEFIT):
+    elif view not in (VIEW_LOG, VIEW_BENEFIT, VIEW_DEGRADE):
         st.info('請先在左側設定分析條件並點擊「執行分析」。')
     st.stop()
 
@@ -1378,7 +1429,7 @@ periods         = saved['periods']
 inc_tt          = saved['include_tt']
 special_raws    = saved.get('special_raws', {})
 
-if view not in (VIEW_LOG, VIEW_BENEFIT) and saved.get('quality_flags'):
+if view not in (VIEW_LOG, VIEW_BENEFIT, VIEW_DEGRADE) and saved.get('quality_flags'):
     _qf = saved['quality_flags']
     st.warning(f"本次分析使用的日期中有 {len(_qf)} 格有資料註記（{dl.flag_counts(_qf)}；"
                f"設定：{saved['quality_mode']}），結果可能受影響。可在左側「日期分配」下方選擇排除後重新分析。")

@@ -87,6 +87,9 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 側邊欄告警（可選擇分析時排除，`QUALITY_EXCLUDE`）、分析結果上方、每日明細「資料註記」欄、全年效益分頁與其 Excel「使用日期」工作表顯示。
 「排除」是外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故、施工），與「錯誤」一樣在第二個排除選項就排除。
 排除只影響當次分析，不改日期分配的勾選；檔案不存在時視為沒有註記。
+`degradation_daily_N.csv`（每日降階統計）同樣由 `aisig publish` 產生：欄位 日期、星期、降階次數、小時制降階次數（同小時計 1 次）、
+降階小時區間、降階分鐘（同時發生不重複計）、主要原因，口徑見計算專案 `docs/使用說明.md` 7.4。`data_loader.load_degradation`／
+`degradation_monthly` 讀取與月彙總；「📉 降階紀錄」分頁（`_render_degradation_view`）不需先執行分析，在 `st.stop()` 之前渲染。
 
 `performance_summary.csv`（UTF-8）必要欄位：
 

@@ -214,3 +214,33 @@ def flag_counts(rows: list[dict]) -> str:
     """flagged_rows 的各等級格數，如「⛔ 錯誤 1、🚧 排除 2、⚠️ 警告 3」（0 格的等級省略，警告除外）。"""
     n = {lv: sum(r['等級'] == lv for r in rows) for lv in QUALITY_ICON}
     return '、'.join(f'{QUALITY_ICON[lv]} {lv} {n[lv]}' for lv in QUALITY_ICON if n[lv] or lv == QUALITY_WARN)
+
+
+# ── 降階統計（計算專案 aisig publish 產生 degradation_daily_N.csv）───────────────
+DEGRADATION_COLS = ['日期', '星期', '降階次數', '小時制降階次數', '降階小時區間', '降階分鐘', '主要原因']
+
+
+def load_degradation(path: str | Path) -> pd.DataFrame:
+    """讀取每日降階統計；檔案不存在時回傳空表。"""
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame(columns=DEGRADATION_COLS)
+    d = pd.read_csv(path, encoding='utf-8-sig', keep_default_na=False)
+    d['日期'] = pd.to_datetime(d['日期'])
+    return d
+
+
+def degradation_monthly(d: pd.DataFrame) -> pd.DataFrame:
+    """依月份彙總：天數、有降階天數、兩種次數、降階時數與日平均。"""
+    g = d.groupby(d['日期'].dt.strftime('%Y/%m'))
+    out = pd.DataFrame({
+        '天數': g.size(),
+        '有降階天數': g['降階次數'].apply(lambda s: int((s > 0).sum())),
+        '降階次數': g['降階次數'].sum(),
+        '小時制降階次數': g['小時制降階次數'].sum(),
+        '降階時數': (g['降階分鐘'].sum() / 60).round(1),
+    })
+    out['日均降階次數'] = (out['降階次數'] / out['天數']).round(2)
+    out['日均小時制次數'] = (out['小時制降階次數'] / out['天數']).round(2)
+    out['日均降階分鐘'] = (g['降階分鐘'].mean()).round(1)
+    return out.rename_axis('月份').reset_index()

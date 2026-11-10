@@ -223,3 +223,37 @@ def _empty_fig(msg: str) -> go.Figure:
                        showarrow=False, font=dict(size=14))
     fig.update_layout(height=250)
     return fig
+
+
+COLOR_DEG_COUNT = '#44546A'
+COLOR_DEG_HOURLY = '#8FAADC'
+COLOR_DEG_MIN = '#C55A11'
+
+
+def make_degradation_count_chart(d: pd.DataFrame) -> go.Figure:
+    """每日降階次數：事件次數 vs 小時制次數（同小時多次計 1 次）。"""
+    if d.empty:
+        return _empty_fig('無降階資料')
+    fig = go.Figure()
+    for col, color in (('降階次數', COLOR_DEG_COUNT), ('小時制降階次數', COLOR_DEG_HOURLY)):
+        fig.add_trace(go.Bar(name=col, x=d['日期'], y=d[col], marker_color=color,
+                             customdata=d[['星期', '降階小時區間', '主要原因']],
+                             hovertemplate='%{x|%Y/%m/%d}（%{customdata[0]}）<br>' + col + '：%{y}'
+                                           '<br>降階小時：%{customdata[1]}<br>原因：%{customdata[2]}<extra></extra>'))
+    fig.update_layout(title='每日降階次數', barmode='group', height=360, yaxis_title='次數',
+                      margin=dict(t=50, b=40, l=50, r=20),
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
+    return fig
+
+
+def make_degradation_minutes_chart(d: pd.DataFrame) -> go.Figure:
+    """每日降階總時長（分鐘，同時發生的降階不重複計）。"""
+    if d.empty:
+        return _empty_fig('無降階資料')
+    fig = go.Figure(go.Bar(x=d['日期'], y=d['降階分鐘'], marker_color=COLOR_DEG_MIN,
+                           customdata=d[['星期', '主要原因']],
+                           hovertemplate='%{x|%Y/%m/%d}（%{customdata[0]}）<br>降階 %{y:.1f} 分鐘'
+                                         '<br>原因：%{customdata[1]}<extra></extra>'))
+    fig.update_layout(title='每日降階總時長（分鐘）', height=320, yaxis_title='分鐘',
+                      margin=dict(t=50, b=40, l=50, r=20))
+    return fig
