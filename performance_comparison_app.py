@@ -61,7 +61,7 @@ SELECTION_PATHS = {
     '桃園三期(高鐵)': 'date_selections_3.json',
 }
 
-# 各場域的資料品質註記（計算專案 aisig publish 產生；錯誤 = 無 VD 資料或完整度過低，警告 = 完整度偏低或通過量異常）
+# 各場域的資料品質註記（計算專案 aisig publish 產生；錯誤 = 無 VD 資料或完整度過低，排除 = 外部壅塞，警告 = 完整度偏低或通過量異常）
 QUALITY_PATHS = {
     '桃園四期(大湳)': 'data_quality_4.csv',
     '桃園三期(高鐵)': 'data_quality_3.csv',
@@ -854,8 +854,8 @@ with st.sidebar:
     quality_mode = dl.QUALITY_EXCLUDE[0]
     _sel_flags = dl.flagged_rows(quality_notes, {p: (before_by_period[p], after_by_period[p]) for p in selected_periods})
     if _sel_flags:
-        _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _sel_flags)
-        st.warning(f'已勾選的日期中有 {len(_sel_flags)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_sel_flags) - _n_err}）')
+        _n_err = sum(r['等級'] != dl.QUALITY_WARN for r in _sel_flags)
+        st.warning(f'已勾選的日期中有 {len(_sel_flags)} 格有資料註記（{dl.flag_counts(_sel_flags)}）')
         with st.expander('資料註記明細', expanded=_n_err > 0):
             st.dataframe(pd.DataFrame(_sel_flags), hide_index=True, use_container_width=True)
         quality_mode = st.radio('分析時有資料註記的日期', dl.QUALITY_EXCLUDE, key='quality_exclude',
@@ -1195,7 +1195,8 @@ def _render_benefit_view():
     )
 
     b_mode = st.radio('有資料註記的日期', dl.QUALITY_EXCLUDE, horizontal=True, key=f'benefit_quality_{selected_site}',
-                      help='⛔ 錯誤 = 無 VD 資料或完整度過低；⚠️ 警告 = 完整度偏低或通過量異常（也可能是颱風、連假前夕等特殊日）')
+                      help='⛔ 錯誤 = 無 VD 資料或完整度過低；🚧 排除 = 外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故）；'
+                           '⚠️ 警告 = 完整度偏低或通過量異常（也可能是颱風、連假前夕等特殊日）')
 
     detail_items, skipped, used_dates = [], [], {}
     for it, row in zip(items, edited.to_dict('records')):
@@ -1226,8 +1227,8 @@ def _render_benefit_view():
     _qf = [{'日期類型': dtype, **r} for (dtype, per), ba in used_dates.items()
            for r in dl.flagged_rows(quality_notes, {per: ba})]
     if _qf:
-        _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _qf)
-        st.warning(f'計算使用的日期中有 {len(_qf)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_qf) - _n_err}），'
+        _n_err = sum(r['等級'] != dl.QUALITY_WARN for r in _qf)
+        st.warning(f'計算使用的日期中有 {len(_qf)} 格有資料註記（{dl.flag_counts(_qf)}），'
                    '平均延滯與通過量可能受影響；可在上方選擇排除。')
         with st.expander('資料註記明細', expanded=_n_err > 0):
             st.dataframe(pd.DataFrame(_qf), hide_index=True, use_container_width=True)
@@ -1379,8 +1380,7 @@ special_raws    = saved.get('special_raws', {})
 
 if view not in (VIEW_LOG, VIEW_BENEFIT) and saved.get('quality_flags'):
     _qf = saved['quality_flags']
-    _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _qf)
-    st.warning(f"本次分析使用的日期中有 {len(_qf)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_qf) - _n_err}；"
+    st.warning(f"本次分析使用的日期中有 {len(_qf)} 格有資料註記（{dl.flag_counts(_qf)}；"
                f"設定：{saved['quality_mode']}），結果可能受影響。可在左側「日期分配」下方選擇排除後重新分析。")
     with st.expander('資料註記明細'):
         st.dataframe(pd.DataFrame(_qf), hide_index=True, use_container_width=True)

@@ -159,8 +159,8 @@ def format_date(ts: pd.Timestamp) -> str:
 
 # ── 資料品質註記（計算專案 aisig publish 產生 data_quality_N.csv）───────────────
 QUALITY_COLS = ['日期', '時段', '等級', '規則', '說明']
-QUALITY_ERROR = '錯誤'
-QUALITY_ICON = {'錯誤': '⛔', '警告': '⚠️'}
+QUALITY_ERROR, QUALITY_DROP, QUALITY_WARN = '錯誤', '排除', '警告'   # 排除 = 外部壅塞等不代表號誌績效的時段
+QUALITY_ICON = {QUALITY_ERROR: '⛔', QUALITY_DROP: '🚧', QUALITY_WARN: '⚠️'}
 
 
 def load_quality(path: str | Path) -> pd.DataFrame:
@@ -174,18 +174,20 @@ def load_quality(path: str | Path) -> pd.DataFrame:
 
 
 def quality_notes(q: pd.DataFrame) -> dict[tuple[pd.Timestamp, str], dict]:
-    """{(日期, 時段): {'error': 是否有錯誤, 'short': '⛔ 無VD資料', 'text': '錯誤：無VD資料（…）'}}。"""
+    """{(日期, 時段): {'error': 是否有錯誤或排除, 'level': 最嚴重等級, 'short': '⛔ 無VD資料', 'text': '錯誤：無VD資料（…）'}}。"""
     out = {}
     for (d, p), g in q.groupby(['日期', '時段']):
+        levels = set(g['等級'])
         out[(pd.Timestamp(d), p)] = {
-            'error': bool((g['等級'] == QUALITY_ERROR).any()),
+            'error': bool(levels & {QUALITY_ERROR, QUALITY_DROP}),
+            'level': next((lv for lv in (QUALITY_ERROR, QUALITY_DROP) if lv in levels), QUALITY_WARN),
             'short': '、'.join(f"{QUALITY_ICON.get(lv, '')} {rule}" for lv, rule in zip(g['等級'], g['規則'])),
             'text':  '；'.join(f'{lv}：{rule}（{desc}）' for lv, rule, desc in zip(g['等級'], g['規則'], g['說明'])),
         }
     return out
 
 
-QUALITY_EXCLUDE = ['不排除', '排除「錯誤」', '排除「錯誤」與「警告」']
+QUALITY_EXCLUDE = ['不排除', '排除「錯誤」與「排除」', '全部排除（含「警告」）']
 
 
 def is_excluded(note: dict | None, mode: str) -> bool:
@@ -204,5 +206,11 @@ def flagged_rows(notes: dict, dates_by_period: dict[str, tuple[list, list]]) -> 
                 n = notes.get((pd.Timestamp(d), p))
                 if n:
                     rows.append({'時段': p, '組別': label, '日期': format_date(pd.Timestamp(d)),
-                                 '等級': QUALITY_ERROR if n['error'] else '警告', '註記': n['text']})
+                                 '等級': n['level'], '註記': n['text']})
     return rows
+
+
+def flag_counts(rows: list[dict]) -> str:
+    """flagged_rows 的各等級格數，如「⛔ 錯誤 1、🚧 排除 2、⚠️ 警告 3」（0 格的等級省略，警告除外）。"""
+    n = {lv: sum(r['等級'] == lv for r in rows) for lv in QUALITY_ICON}
+    return '、'.join(f'{QUALITY_ICON[lv]} {lv} {n[lv]}' for lv in QUALITY_ICON if n[lv] or lv == QUALITY_WARN)

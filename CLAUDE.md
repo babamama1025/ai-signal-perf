@@ -82,9 +82,10 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 （`perf_analyze`、`2504-BA測試/code`）覆蓋**；改設定要在計算專案的 `sites/*.toml` 改完重算再發佈。
 `perf_summary_N_舊口徑.csv` 是切換前舊程式的版本，只供對照、不再更新。
 `ai_operation_log_N.csv`、`date_selections_N.json` 仍在本網頁編輯。
-`data_quality_N.csv`（資料品質註記）同樣由 `aisig publish` 產生：欄位 日期、時段、等級（錯誤／警告）、規則、說明，
+`data_quality_N.csv`（資料品質註記）同樣由 `aisig publish` 產生：欄位 日期、時段、等級（錯誤／排除／警告）、規則、說明，
 規則與門檻見計算專案 `docs/使用說明.md` 7.9。`data_loader.load_quality`／`quality_notes` 讀取；網頁在日期分配表「資料」欄、
 側邊欄告警（可選擇分析時排除，`QUALITY_EXCLUDE`）、分析結果上方、每日明細「資料註記」欄、全年效益分頁與其 Excel「使用日期」工作表顯示。
+「排除」是外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故、施工），與「錯誤」一樣在第二個排除選項就排除。
 排除只影響當次分析，不改日期分配的勾選；檔案不存在時視為沒有註記。
 
 `performance_summary.csv`（UTF-8）必要欄位：
