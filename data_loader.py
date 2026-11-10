@@ -155,3 +155,54 @@ def get_metrics(df: pd.DataFrame) -> list[str]:
 
 def format_date(ts: pd.Timestamp) -> str:
     return f"{ts.strftime('%Y/%m/%d')} (週{TW_WEEKDAY[ts.weekday()]})"
+
+
+# ── 資料品質註記（計算專案 aisig publish 產生 data_quality_N.csv）───────────────
+QUALITY_COLS = ['日期', '時段', '等級', '規則', '說明']
+QUALITY_ERROR = '錯誤'
+QUALITY_ICON = {'錯誤': '⛔', '警告': '⚠️'}
+
+
+def load_quality(path: str | Path) -> pd.DataFrame:
+    """讀取資料品質註記；檔案不存在時回傳空表（未發佈過註記的場域）。"""
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame(columns=QUALITY_COLS)
+    q = pd.read_csv(path, encoding='utf-8-sig')
+    q['日期'] = pd.to_datetime(q['日期'])
+    return q
+
+
+def quality_notes(q: pd.DataFrame) -> dict[tuple[pd.Timestamp, str], dict]:
+    """{(日期, 時段): {'error': 是否有錯誤, 'short': '⛔ 無VD資料', 'text': '錯誤：無VD資料（…）'}}。"""
+    out = {}
+    for (d, p), g in q.groupby(['日期', '時段']):
+        out[(pd.Timestamp(d), p)] = {
+            'error': bool((g['等級'] == QUALITY_ERROR).any()),
+            'short': '、'.join(f"{QUALITY_ICON.get(lv, '')} {rule}" for lv, rule in zip(g['等級'], g['規則'])),
+            'text':  '；'.join(f'{lv}：{rule}（{desc}）' for lv, rule, desc in zip(g['等級'], g['規則'], g['說明'])),
+        }
+    return out
+
+
+QUALITY_EXCLUDE = ['不排除', '排除「錯誤」', '排除「錯誤」與「警告」']
+
+
+def is_excluded(note: dict | None, mode: str) -> bool:
+    """mode 為 QUALITY_EXCLUDE 之一。"""
+    if note is None or mode == QUALITY_EXCLUDE[0]:
+        return False
+    return note['error'] or mode == QUALITY_EXCLUDE[2]
+
+
+def flagged_rows(notes: dict, dates_by_period: dict[str, tuple[list, list]]) -> list[dict]:
+    """所選日期中有註記者：[{時段, 組別, 日期, 等級, 註記}]；dates_by_period：{時段: (事前日期, 事後日期)}。"""
+    rows = []
+    for p, (before, after) in dates_by_period.items():
+        for label, dates in (('事前', before), ('事後', after)):
+            for d in sorted(dates):
+                n = notes.get((pd.Timestamp(d), p))
+                if n:
+                    rows.append({'時段': p, '組別': label, '日期': format_date(pd.Timestamp(d)),
+                                 '等級': QUALITY_ERROR if n['error'] else '警告', '註記': n['text']})
+    return rows

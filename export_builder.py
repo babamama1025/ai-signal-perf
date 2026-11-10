@@ -685,10 +685,12 @@ _BENEFIT_STEPS = [
 
 
 def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[str, str],
-                       used_dates: dict[tuple[str, str], tuple[list, list]]) -> io.BytesIO:
+                       used_dates: dict[tuple[str, str], tuple[list, list]],
+                       notes: dict[tuple[pd.Timestamp, str], str] | None = None) -> io.BytesIO:
     """全年效益估算報告：全年效益（四種組合）→ 各時段 → 使用日期 → 參數。數值皆以 Excel 公式計算。
 
     used_dates：{(日期類型, 時段): (事前日期, 事後日期)}，列出各時段計算所用的日期。
+    notes：{(日期, 時段): 資料品質註記}，列在「使用日期」工作表。
     """
     from benefit_logic import COMBOS, combo_label
     wb = Workbook()
@@ -749,20 +751,21 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
     ws_det.freeze_panes = 'C2'
 
     # 使用日期（每列一個日期；平均值取這些日期中有資料者）
-    for c, h in enumerate(['日期類型', '時段', '事前/事後', '日期', '星期'], 1):
+    notes = notes or {}
+    for c, h in enumerate(['日期類型', '時段', '事前/事後', '日期', '星期', '資料註記'], 1):
         _hdr(ws_dat.cell(1, c, h))
     i = 2
     for rec in detail.to_dict('records'):
         for label, dates in zip(('事前', '事後'), used_dates[(rec['日期類型'], rec['時段'])]):
             for d in sorted(dates):
                 for c, v in enumerate([rec['日期類型'], rec['時段'], label, d.strftime('%Y/%m/%d'),
-                                       '一二三四五六日'[d.weekday()]], 1):
+                                       '一二三四五六日'[d.weekday()], notes.get((pd.Timestamp(d), rec['時段']), '')], 1):
                     ws_dat.cell(i, c, v).font = FONT_NORMAL
                 i += 1
-    for col, w in zip('ABCDE', (10, 14, 10, 12, 6)):
+    for col, w in zip('ABCDEF', (10, 14, 10, 12, 6, 80)):
         ws_dat.column_dimensions[col].width = w
     ws_dat.freeze_panes = 'A2'
-    ws_dat.auto_filter.ref = f'A1:E{max(i - 1, 1)}'
+    ws_dat.auto_filter.ref = f'A1:F{max(i - 1, 1)}'
 
     # 全年效益
     ws_sum['A1'] = '全年效益估算（停等延滯節省 → 時間價值、節油、減碳）'

@@ -61,6 +61,12 @@ SELECTION_PATHS = {
     '桃園三期(高鐵)': 'date_selections_3.json',
 }
 
+# 各場域的資料品質註記（計算專案 aisig publish 產生；錯誤 = 無 VD 資料或完整度過低，警告 = 完整度偏低或通過量異常）
+QUALITY_PATHS = {
+    '桃園四期(大湳)': 'data_quality_4.csv',
+    '桃園三期(高鐵)': 'data_quality_3.csv',
+}
+
 # ── 旅行時間指標說明（popover 用）────────────────────────────────────────────
 _TT_METRIC_INFO_MD = """
 #### 一、平均旅行時間
@@ -559,6 +565,7 @@ if st.session_state.get('_uploaded_csv_hash') != _upload_hash:
 CSV_PATH       = DATA_DIR / _selected_data_file
 LOG_PATH       = DATA_DIR / LOG_PATHS[selected_site]
 SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
+QUALITY_PATH   = DATA_DIR / QUALITY_PATHS[selected_site]
 
 if _upload_content is not None:
     try:
@@ -577,6 +584,7 @@ all_dates      = dl.get_available_dates(df)
 all_periods    = dl.get_available_periods(df)
 system_cols    = dl.get_system_columns()
 extra_entities = SITE3_EXTRA_ENTITIES if selected_site == '桃園三期(高鐵)' else []
+quality_notes  = dl.quality_notes(dl.load_quality(QUALITY_PATH))   # {(日期, 時段): 註記}
 
 
 # ── 日期表格建立輔助函式 ─────────────────────────────────────────────────────
@@ -815,8 +823,10 @@ with st.sidebar:
     if bcol3.button('✖ 取消勾選', use_container_width=True, disabled=not batch_dates):
         _apply_batch(False, False)
 
+    _date_df = st.session_state['date_df']
     edited_df = st.data_editor(
-        st.session_state['date_df'],
+        _date_df.assign(資料=[quality_notes.get((pd.Timestamp(d), p), {}).get('short', '')
+                            for d, p in zip(_date_df['日期'], _date_df['時段'])]),
         key=f'date_editor_{st.session_state["editor_ver"]}',
         column_config={
             '日期': st.column_config.TextColumn('日期', disabled=True, width='small'),
@@ -824,11 +834,14 @@ with st.sidebar:
             '時段': st.column_config.TextColumn('時段', disabled=True, width='small'),
             '事前': st.column_config.CheckboxColumn('事前', width='small'),
             '事後': st.column_config.CheckboxColumn('事後', width='small'),
+            '資料': st.column_config.TextColumn('資料', disabled=True,
+                                                help='資料品質註記：⛔ 錯誤（無 VD 資料或完整度過低）、⚠️ 警告（完整度偏低或通過量異常，'
+                                                     '也可能是颱風、連假前夕等特殊日）'),
         },
         hide_index=True,
         height=400,
         use_container_width=True,
-    )
+    ).drop(columns='資料')
 
     before_by_period: dict[str, list] = {}
     after_by_period:  dict[str, list] = {}
@@ -836,6 +849,20 @@ with st.sidebar:
         sub = edited_df[edited_df['時段'] == p]
         before_by_period[p] = [pd.Timestamp(r) for r in sub.loc[sub['事前'], '日期']]
         after_by_period[p]  = [pd.Timestamp(r) for r in sub.loc[sub['事後'], '日期']]
+
+    # 已勾選的日期中有資料品質註記 → 告警，並可選擇分析時排除
+    quality_mode = dl.QUALITY_EXCLUDE[0]
+    _sel_flags = dl.flagged_rows(quality_notes, {p: (before_by_period[p], after_by_period[p]) for p in selected_periods})
+    if _sel_flags:
+        _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _sel_flags)
+        st.warning(f'已勾選的日期中有 {len(_sel_flags)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_sel_flags) - _n_err}）')
+        with st.expander('資料註記明細', expanded=_n_err > 0):
+            st.dataframe(pd.DataFrame(_sel_flags), hide_index=True, use_container_width=True)
+        quality_mode = st.radio('分析時有資料註記的日期', dl.QUALITY_EXCLUDE, key='quality_exclude',
+                                help='只影響本次分析，不改變日期分配的勾選；警告可能是特殊交通日而非資料錯誤，請看明細判斷')
+        for p in selected_periods:
+            before_by_period[p] = [d for d in before_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
+            after_by_period[p]  = [d for d in after_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
 
     if selected_periods:
         counts_str = '　'.join(
@@ -1080,6 +1107,9 @@ with st.sidebar:
                 'periods':          selected_periods,
                 'include_tt':       include_tt,
                 'special_raws':     special_raws,
+                'quality_mode':     quality_mode,
+                'quality_flags':    dl.flagged_rows(quality_notes, {p: (before_by_period[p], after_by_period[p])
+                                                                    for p in selected_periods}),
             }
         st.success('分析完成！')
 
@@ -1164,11 +1194,14 @@ def _render_benefit_view():
         key=f'benefit_editor_{selected_site}_{names[bl.WEEKDAY]}_{names[bl.WEEKEND]}',
     )
 
+    b_mode = st.radio('有資料註記的日期', dl.QUALITY_EXCLUDE, horizontal=True, key=f'benefit_quality_{selected_site}',
+                      help='⛔ 錯誤 = 無 VD 資料或完整度過低；⚠️ 警告 = 完整度偏低或通過量異常（也可能是颱風、連假前夕等特殊日）')
+
     detail_items, skipped, used_dates = [], [], {}
     for it, row in zip(items, edited.to_dict('records')):
         if not row['納入']:
             continue
-        b, a = it['_dates']
+        b, a = ([d for d in ds if not dl.is_excluded(quality_notes.get((d, it['時段'])), b_mode)] for ds in it['_dates'])
         if not (b and a):
             skipped.append(f"{it['日期類型']} {it['時段']}（缺事前或事後日期）")
             continue
@@ -1190,6 +1223,14 @@ def _render_benefit_view():
     if not detail_items:
         st.info('沒有可計算的時段。')
         return
+    _qf = [{'日期類型': dtype, **r} for (dtype, per), ba in used_dates.items()
+           for r in dl.flagged_rows(quality_notes, {per: ba})]
+    if _qf:
+        _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _qf)
+        st.warning(f'計算使用的日期中有 {len(_qf)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_qf) - _n_err}），'
+                   '平均延滯與通過量可能受影響；可在上方選擇排除。')
+        with st.expander('資料註記明細', expanded=_n_err > 0):
+            st.dataframe(pd.DataFrame(_qf), hide_index=True, use_container_width=True)
 
     detail      = bl.build_detail(detail_items, params)
     table, best = bl.summarize(detail, params)
@@ -1236,10 +1277,11 @@ def _render_benefit_view():
                      use_container_width=True, hide_index=True)
 
     meta = {'場域': selected_site, '平日日期分配': names[bl.WEEKDAY], '假日日期分配': names[bl.WEEKEND],
-            '計算對象': entity, '產製時間': datetime.now().strftime('%Y/%m/%d %H:%M')}
+            '計算對象': entity, '資料註記': b_mode, '產製時間': datetime.now().strftime('%Y/%m/%d %H:%M')}
     st.download_button(
         '⬇️ 下載全年效益 Excel（含公式）',
-        data=eb.build_benefit_xlsx(detail, best, cfg, meta, used_dates),
+        data=eb.build_benefit_xlsx(detail, best, cfg, meta, used_dates,
+                                   {k: v['text'] for k, v in quality_notes.items()}),
         file_name=f"全年效益_{selected_site}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
@@ -1334,6 +1376,14 @@ ad_by_period    = saved['after_by_period']
 periods         = saved['periods']
 inc_tt          = saved['include_tt']
 special_raws    = saved.get('special_raws', {})
+
+if view not in (VIEW_LOG, VIEW_BENEFIT) and saved.get('quality_flags'):
+    _qf = saved['quality_flags']
+    _n_err = sum(r['等級'] == dl.QUALITY_ERROR for r in _qf)
+    st.warning(f"本次分析使用的日期中有 {len(_qf)} 格有資料註記（⛔ 錯誤 {_n_err}、⚠️ 警告 {len(_qf) - _n_err}；"
+               f"設定：{saved['quality_mode']}），結果可能受影響。可在左側「日期分配」下方選擇排除後重新分析。")
+    with st.expander('資料註記明細'):
+        st.dataframe(pd.DataFrame(_qf), hide_index=True, use_container_width=True)
 
 
 # ── 共用選擇器（時段明細、每日分析共用）＋ 系統層級關鍵數字 ──────────────────────
@@ -1495,6 +1545,7 @@ if view == VIEW_DAILY:
             '星期':    _base['日期'].apply(lambda d: dl.TW_WEEKDAY[d.weekday()]),
             '組別':    _base['組別'],
             'AI 狀態': _base['日期'].apply(lambda d: _status.get((d.strftime('%Y/%m/%d'), daily_period), '—')),
+            '資料註記': _base['日期'].apply(lambda d: quality_notes.get((d, daily_period), {}).get('text', '')),
         })
         _flag_by_col: dict[str, pd.Series] = {}
         for c in daily_cols:
