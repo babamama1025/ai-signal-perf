@@ -1525,6 +1525,12 @@ if view == VIEW_EXPORT:
         help='每個時段一張「每日_」工作表：列出系統、路口（與旅行時間）的每日數值，'
              '並依「每日分析」分頁的「異常門檻」設定標示明顯較差／較好的日期',
     )
+    include_deg = st.checkbox(
+        '包含降階紀錄工作表',
+        value=True,
+        help='「降階紀錄」工作表：本次分析事前／事後日期的每日降階次數、小時制次數、降階分鐘與主要原因，'
+             '並附兩組合計與日平均（降階為整天數字，不分時段）',
+    )
     if st.button('產生 Excel 報告'):
         with st.spinner('產生 Excel 中…'):
             buf = eb.build_comparison_xlsx(
@@ -1536,6 +1542,7 @@ if view == VIEW_EXPORT:
                 day_type_label='假日' if is_weekend else '平日',
                 daily_df=df if include_daily else None,
                 daily_k=st.session_state['daily_k'],
+                degradation_df=dl.load_degradation(DEGRADATION_PATH) if include_deg else None,
             )
         ts = datetime.now().strftime('%Y%m%d_%H%M')
         st.download_button(

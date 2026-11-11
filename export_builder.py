@@ -59,6 +59,7 @@ def build_comparison_xlsx(
     day_type_label: str = '平日',
     daily_df: pd.DataFrame | None = None,
     daily_k: float = 1.5,
+    degradation_df: pd.DataFrame | None = None,
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
@@ -81,6 +82,8 @@ def build_comparison_xlsx(
                 before_by_period.get(period, []), after_by_period.get(period, []),
                 include_travel_time, daily_k,
             )
+    if degradation_df is not None:
+        _build_degradation_sheet(wb, degradation_df, before_by_period, after_by_period)
     if raw_df is not None and raw_periods:
         _build_raw_data_sheet(wb, raw_df, before_by_period, after_by_period, raw_periods)
 
@@ -559,6 +562,54 @@ def _build_daily_sheet(wb, df, period, before_dates, after_dates,
     for col in range(len(fixed) + 1, total_cols + 1):
         ws.column_dimensions[get_column_letter(col)].width = 12
     ws.freeze_panes = ws.cell(4, len(fixed) + 1)
+
+
+_DEG_COLS = ['降階次數', '小時制降階次數', '降階小時區間', '降階分鐘', '主要原因']
+
+
+def _build_degradation_sheet(wb, deg, before_by_period, after_by_period):
+    """降階紀錄：分析所用的事前／事後日期（各時段聯集）的每日降階統計；降階為整天數字，不分時段。
+    上方為各組合計與日平均（日平均以有降階資料的天數為分母），下方為每日明細。"""
+    ws = wb.create_sheet('降階紀錄')
+    groups = {g: {pd.Timestamp(d).normalize() for ds in by.values() for d in ds}
+              for g, by in (('事前', before_by_period), ('事後', after_by_period))}
+    by_date = deg.set_index(deg['日期'].dt.normalize())
+
+    ws.cell(1, 1, '降階統計為整天數字（不分時段），列出本次分析各時段事前／事後日期的聯集；'
+                  '來源：平台降階紀錄（計算專案 aisig publish 產生）').font = FONT_BOLD
+
+    sum_hdr = ['組別', '天數', '有降階資料天數', '有降階天數', '降階次數', '小時制降階次數', '降階時數',
+               '日均降階次數', '日均小時制次數', '日均降階分鐘']
+    for c, h in enumerate(sum_hdr, 1):
+        _hdr(ws.cell(3, c, h))
+    for r, (g, dates) in enumerate(groups.items(), 4):
+        d = by_date.loc[by_date.index.isin(dates)]
+        n = len(d)
+        vals = [g, len(dates), n, int((d['降階次數'] > 0).sum()), int(d['降階次數'].sum()),
+                int(d['小時制降階次數'].sum()), round(d['降階分鐘'].sum() / 60, 1),
+                round(d['降階次數'].sum() / n, 2) if n else '—',
+                round(d['小時制降階次數'].sum() / n, 2) if n else '—',
+                round(d['降階分鐘'].mean(), 1) if n else '—']
+        for c, v in enumerate(vals, 1):
+            ws.cell(r, c, v).font = FONT_NORMAL
+
+    row = 4 + len(groups) + 1
+    for c, h in enumerate(['日期', '星期', '組別'] + _DEG_COLS, 1):
+        _hdr(ws.cell(row, c, h))
+    for d in sorted(groups['事前'] | groups['事後']):
+        row += 1
+        g = '、'.join(k for k, v in groups.items() if d in v)
+        vals = ([by_date.loc[d, c] for c in _DEG_COLS] if d in by_date.index
+                else ['無資料'] + [''] * (len(_DEG_COLS) - 1))
+        for c, v in enumerate([d.strftime('%Y/%m/%d'), '一二三四五六日'[d.weekday()], g] + vals, 1):
+            cell = ws.cell(row, c, v)
+            cell.font = FONT_NORMAL
+            if c == 4 + _DEG_COLS.index('降階分鐘'):
+                cell.number_format = '0.0'
+
+    for col, w in zip('ABCDEFGHIJ', (12, 8, 12, 12, 16, 22, 12, 40, 14, 14)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = ws.cell(4 + len(groups) + 2, 1)
 
 
 def _write_section(ws, row: int, header: str, df: pd.DataFrame, metric: str, fill, total_cols: int = 5) -> int:

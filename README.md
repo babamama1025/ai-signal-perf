@@ -13,7 +13,7 @@
   - 旅行時間廊道（秒）
 - **多層級比較**：系統總量 → 各路口聚合 → 各來向明細
 - **Plotly 視覺化**：改善率概覽圖、事前 vs 事後群組長條圖、旅行時間廊道比較圖
-- **Excel 報告匯出**：含分析說明、總表、各時段明細工作表，可選加入原始資料
+- **Excel 報告匯出**：含分析說明、總表、各時段明細工作表，可選加入每日明細、降階紀錄、原始資料
 
 ## 專案結構
 
@@ -110,4 +110,4 @@ python -m streamlit run performance_comparison_app.py
 | `data_loader.py` | 讀取 CSV、自動偵測路口/來向/旅行時間欄位結構、從 Excel 讀取測試日分類 |
 | `comparison_logic.py` | 依時段與日期集合計算各指標的事前/事後均值與改善率，產生文字摘要 |
 | `chart_builder.py` | 以 Plotly 建立概覽圖、指標長條圖、旅行時間廊道比較圖 |
-| `export_builder.py` | 以 openpyxl 輸出含樣式的 Excel 報告（分析說明、總表、各時段、原始資料） |
+| `export_builder.py` | 以 openpyxl 輸出含樣式的 Excel 報告（分析說明、總表、各時段、每日明細、降階紀錄、原始資料） |

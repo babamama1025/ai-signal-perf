@@ -66,7 +66,7 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 
 ### export_builder.py
 
-**工作表結構：** 分析說明 → 總表（`_build_summary_sheet`）→ 路口績效 → 各時段（`_build_period_sheet`）→ 每日明細（`_build_daily_sheet`，選用，每時段一張 `每日_HHMM-HHMM`）→ 原始資料（選用）
+**工作表結構：** 分析說明 → 總表（`_build_summary_sheet`）→ 路口績效 → 各時段（`_build_period_sheet`）→ 每日明細（`_build_daily_sheet`，選用，每時段一張 `每日_HHMM-HHMM`）→ 降階紀錄（`_build_degradation_sheet`，選用，預設勾選；事前／事後日期聯集的每日降階與兩組合計、日平均，降階為整天數字不分時段）→ 原始資料（選用）
 
 **樣式：**
 - `_apply_num_format`：目前所有數值欄一律使用 `'0'`（無逗號整數格式）
