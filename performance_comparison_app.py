@@ -1019,6 +1019,10 @@ _BENEFIT_FORMULA_MD = """
 
 **人-分鐘** = H × 小客車都會平均乘載率 × 60（H = 全年車-秒 / 3600；每車都以小客車乘載率計）
 
+**減少旅行時間（人-分鐘/年）**（有「總加權旅行時間」的場域）：T = 總加權旅行時間（Σ 路徑旅行時間 × 代表路段流量，車-秒），
+W = T ÷ 加權平均旅行時間；以 T、W 代入上面的 D、V，同樣算 A/B × 1/2，再 × 乘載率 × 60 / 3600。
+旅行時間已含停等延滯，只列人-分鐘，**不計入貨幣化**。
+
 **貨幣化**（H = 全年車-秒 / 3600）：
 時間價值 = H × 時間價值；節油（公升）= H × 怠速油耗率；油費 = 節油 × 油價；
 CO2（公噸）= 節油 × 排放率（公斤/公升）/ 1000；CO2 效益 = CO2 × 損害成本；合計 = 時間價值 + 油費 + CO2 效益
@@ -1124,6 +1128,7 @@ def _render_benefit_view():
                       help='⛔ 錯誤 = 無 VD 資料或完整度過低；🚧 排除 = 外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故）；'
                            '⚠️ 警告 = 完整度偏低或通過量異常（也可能是颱風、連假前夕等特殊日）')
 
+    has_tt = {bl.TT_TOTAL_COL, bl.TT_AVG_COL} <= set(df.columns)
     detail_items, skipped, used_dates = [], [], {}
     for it, row in zip(items, edited.to_dict('records')):
         if not row['納入']:
@@ -1136,6 +1141,8 @@ def _render_benefit_view():
         if any(pd.isna(v) or v == 0 for v in m.values()):
             skipped.append(f"{it['日期類型']} {it['時段']}（{entity} 無延滯或通過量資料）")
             continue
+        if has_tt:
+            m.update(bl.period_tt_means(df, it['時段'], b, a))
         detail_items.append({'日期類型': it['日期類型'], '時段': it['時段'], '尖峰': bool(row['尖峰']),
                              **m, '事前日數': len(b), '事後日數': len(a)})
         used_dates[(it['日期類型'], it['時段'])] = (b, a)
@@ -1166,20 +1173,34 @@ def _render_benefit_view():
     st.subheader('🌱 全年效益（採用 ' + bl.combo_label(best[0], best[1]) + '）')
     _pct = None if pd.isna(r['改善率']) else (
         f"{r['改善率'] * 100:+.1f}% " + ('改善' if r['改善率'] >= 0 else '惡化'))
-    k1, k2, k3, k4 = st.columns(4)
+    has_tt_result = '減少旅行時間(人-分鐘)' in table and pd.notna(r['減少旅行時間(人-分鐘)'])
+    ks = st.columns(5 if has_tt_result else 4)
+    k1, k2, k3, k4 = ks[:4]
     k1.metric('節省停等時間', f"{r['全年效益值(車-小時)']:,.0f} 車-小時/年", _pct)
     k1.caption(f"≈ {r['節省停等時間(人-分鐘)'] / 1e4:,.0f} 萬 人-分鐘/年（× 乘載率 {params['occupancy']} 人/車 × 60）")
     k2.metric('節省油耗', f"{r['油耗節省(公升)']:,.0f} 公升/年", _pct)
     k3.metric('減少 CO2', f"{r['CO2減少量(公噸)']:,.1f} 公噸/年", _pct)
     k4.metric('全年貨幣化效益', f"{r['全年貨幣化效益(元)'] / 1e4:,.0f} 萬元/年")
+    if has_tt_result:
+        _tpct = None if pd.isna(r['旅行時間改善率']) else (
+            f"{r['旅行時間改善率'] * 100:+.1f}% " + ('改善' if r['旅行時間改善率'] >= 0 else '惡化'))
+        ks[4].metric('減少旅行時間', f"{r['減少旅行時間(人-分鐘)'] / 1e4:,.0f} 萬 人-分鐘/年", _tpct)
+        ks[4].caption('由總加權旅行時間換算（系統層級），不計入貨幣化')
     st.caption('採用四種組合中全年貨幣化效益最高者；各組合結果見下表。'
                '改善率 = 節省量 ÷ 原時制下的全年停等延滯（A 用事前總延滯，B 用事前每車延滯 × 事後通過量）；'
                '油耗、CO2 都與停等時間成正比，所以三者改善率相同。')
+    if has_tt_result:
+        _no_tt = [f"{x['日期類型']} {x['時段']}" for x in detail.to_dict('records')
+                  if pd.isna(x['ΔT_A']) or pd.isna(x['ΔT_B'])]
+        st.caption('減少旅行時間 = 總加權旅行時間（Σ 路徑旅行時間 × 代表路段流量）的全年節省 × 乘載率 × 60 ÷ 3600，'
+                   '組合與停等延滯相同（B 的流量 = 總加權旅行時間 ÷ 加權平均旅行時間）；'
+                   '旅行時間已含路徑上的停等延滯，所以只列人-分鐘、不另計時間價值。'
+                   + ('沒有旅行時間資料、未計入的時段：' + '、'.join(_esc_md(x) for x in _no_tt) if _no_tt else ''))
 
     st.markdown('**四種計算組合**')
     _fmt = {c: '{:,.0f}' for c in table.columns if c != '組合'}
     _fmt.update({'全年效益值(車-小時)': '{:,.1f}', '油耗節省(公升)': '{:,.1f}', 'CO2減少量(公噸)': '{:,.2f}',
-                 '改善率': '{:+.1%}'})
+                 '改善率': '{:+.1%}', '旅行時間改善率': '{:+.1%}'})
     st.dataframe(
         table.style.format(_fmt).apply(
             lambda s: ['background-color: #C6EFCE; color: #006100; font-weight: bold' if s.name == best else ''] * len(s), axis=1),
@@ -1188,14 +1209,20 @@ def _render_benefit_view():
 
     st.markdown(f'**各時段明細**（{entity}）')
     show = detail.rename(columns={'D_before': '事前總延滯', 'D_after': '事後總延滯',
-                                  'V_before': '事前通過量', 'V_after': '事後通過量'})
+                                  'V_before': '事前通過量', 'V_after': '事後通過量',
+                                  'T_before': '事前總加權旅行時間', 'T_after': '事後總加權旅行時間',
+                                  'W_before': '事前加權流量', 'W_after': '事後加權流量'})
     show['尖峰'] = show['尖峰'].map({True: '是', False: '否'})
     _dfmt = {c: '{:,.0f}' for c in show.columns
-             if c.startswith(('事前總', '事後總', '事前通', '事後通', 'ΔD', '基準', '年車秒', '年基準'))}
+             if c.startswith(('事前總', '事後總', '事前通', '事後通', '事前加權', '事後加權',
+                              'ΔD', 'ΔT', '基準', '年車秒', '年基準', '年旅行'))}
     _dfmt.update({'時數': '{:.1f}', '代表時數': '{:.1f}'})
     st.dataframe(show.style.format(_dfmt), use_container_width=True, hide_index=True)
     st.caption('單位：總延滯、ΔD、基準為車-秒/日；通過量為輛/日；年車秒為該時段對全年效益值的貢獻、'
-               '年基準為改善率的分母（車-秒/年）。')
+               '年基準為改善率的分母（車-秒/年）。'
+               + ('總加權旅行時間、ΔT、基準T 為車-秒/日，加權流量 = 總加權旅行時間 ÷ 加權平均旅行時間（輛/日）；'
+                  '年旅行車秒／年旅行基準為減少旅行時間的貢獻與分母（系統層級，不隨計算對象變動）。'
+                  if 'T_before' in detail else ''))
 
     with st.expander('📐 計算方式與參數', expanded=False):
         st.markdown(_BENEFIT_FORMULA_MD)

@@ -717,6 +717,23 @@ _BENEFIT_DETAIL_COLS = [
     ('全年基準 B1 =基準_B×年天數', None, '#,##0'),
     ('全年基準 B2 =基準_B×代表時數/時數×年天數', None, '#,##0'),
 ]
+# 有總加權旅行時間時附加（T 對應 D、W 對應 V；系統層級）
+_BENEFIT_TT_COLS = [
+    ('事前總加權旅行時間 T前(車-秒/日)', 'T_before', '#,##0.0'), ('事後總加權旅行時間 T後(車-秒/日)', 'T_after', '#,##0.0'),
+    ('事前加權流量 W前=T前÷加權平均旅行時間(輛/日)', 'W_before', '#,##0.0'),
+    ('事後加權流量 W後=T後÷加權平均旅行時間(輛/日)', 'W_after', '#,##0.0'),
+    ('ΔT_A =T前−T後', None, '#,##0.0'), ('ΔT_B =(T前/W前−T後/W後)×W後', None, '#,##0.0'),
+    ('全年旅行車-秒 A1 =ΔT_A×年天數', None, '#,##0'),
+    ('全年旅行車-秒 A2 =ΔT_A×代表時數/時數×年天數', None, '#,##0'),
+    ('全年旅行車-秒 B1 =ΔT_B×年天數', None, '#,##0'),
+    ('全年旅行車-秒 B2 =ΔT_B×代表時數/時數×年天數', None, '#,##0'),
+    ('基準T_A =T前', None, '#,##0.0'), ('基準T_B =T前/W前×W後', None, '#,##0.0'),
+    ('全年旅行基準 A1 =基準T_A×年天數', None, '#,##0'),
+    ('全年旅行基準 A2 =基準T_A×代表時數/時數×年天數', None, '#,##0'),
+    ('全年旅行基準 B1 =基準T_B×年天數', None, '#,##0'),
+    ('全年旅行基準 B2 =基準T_B×代表時數/時數×年天數', None, '#,##0'),
+]
+_COMBO_DAILY = {'全年車-秒': 'ΔD_', '全年基準': '基準_', '全年旅行車-秒': 'ΔT_', '全年旅行基準': '基準T_'}
 
 # (列名, 公式樣板, 數值格式)；{tot}/{base} = 該組合全年車-秒／全年基準的加總，{p[key]} = 參數儲存格，{r[n]} = 本欄第 n 列
 _BENEFIT_STEPS = [
@@ -730,6 +747,12 @@ _BENEFIT_STEPS = [
     ('CO2貨幣化效益(元)',   '={r[6]}*{p[co2_cost]}',         '#,##0'),
     ('全年貨幣化效益(元)',  '={r[3]}+{r[5]}+{r[7]}',         '#,##0'),
     ('改善率(停等時間、油耗、CO2 相同)', '={tot}/{base}',     '0.0%'),
+]
+# {ttot}/{tbase} = 該組合全年旅行車-秒／全年旅行基準的加總；r[10] = 減少旅行時間(車-秒)
+_BENEFIT_TT_STEPS = [
+    ('減少旅行時間(車-秒)',   '={ttot}',                           '#,##0'),
+    ('減少旅行時間(人-分鐘)', '={r[10]}/3600*{p[occupancy]}*60',   '#,##0'),
+    ('旅行時間改善率',        '=IFERROR({ttot}/{tbase},"—")',      '0.0%'),
 ]
 
 
@@ -764,10 +787,13 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
         ws_par.column_dimensions[col].width = w
 
     # 各時段
-    for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1):
+    has_tt = 'T_before' in detail
+    cols = _BENEFIT_DETAIL_COLS + (_BENEFIT_TT_COLS if has_tt else [])
+    tt_keys = {h.split(' ')[0] for h, _, _ in _BENEFIT_TT_COLS}
+    for c, (h, _, _) in enumerate(cols, 1):
         _hdr(ws_det.cell(1, c, h))
         ws_det.column_dimensions[get_column_letter(c)].width = 16
-    L = {h.split(' ')[0]: get_column_letter(c) for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1)}
+    L = {h.split(' ')[0]: get_column_letter(c) for c, (h, _, _) in enumerate(cols, 1)}
     n = len(detail)
     for i, rec in enumerate(detail.to_dict('records'), 2):
         f = {k: f'{L[k]}{i}' for k in L}
@@ -777,15 +803,23 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
             '基準_A': f"={f['事前總停等延滯']}",
             '基準_B': f"={f['事前總停等延滯']}/{f['事前通過量']}*{f['事後通過量']}",
         }
-        for c, (h, src, fmt) in enumerate(_BENEFIT_DETAIL_COLS, 1):
-            if src is not None:
+        if has_tt:
+            T0, T1, W0, W1 = (f[k] for k in ('事前總加權旅行時間', '事後總加權旅行時間', '事前加權流量', '事後加權流量'))
+            formulas.update({'ΔT_A': f'={T0}-{T1}', 'ΔT_B': f'=({T0}/{W0}-{T1}/{W1})*{W1}',
+                             '基準T_A': f'={T0}', '基準T_B': f'={T0}/{W0}*{W1}'})
+        no_tt = has_tt and any(pd.isna(rec[k]) for k in ('T_before', 'T_after', 'W_before', 'W_after'))
+        for c, (h, src, fmt) in enumerate(cols, 1):
+            key = h.split(' ')[0]
+            if no_tt and key in tt_keys:
+                val = None   # 無旅行時間資料：留空，SUM 不計
+            elif src is not None:
                 val = rec[src]
                 val = ('是' if val else '否') if src == '尖峰' else val
-            elif h.startswith(('ΔD_', '基準_')):
-                val = formulas[h.split(' ')[0]]
+            elif key in formulas:
+                val = formulas[key]
             else:
                 combo = h.split(' ')[1]
-                daily = 'ΔD_' if h.startswith('全年車-秒') else '基準_'
+                daily = _COMBO_DAILY[key]
                 dd = f"{L[daily + combo[0]]}{i}"
                 scale = '' if combo[1] == '1' else f"*{f['代表時數']}/{f['時數']}"
                 val = f"={dd}{scale}*{f['年天數']}"
@@ -793,10 +827,11 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
             cell.font = FONT_NORMAL
             if fmt:
                 cell.number_format = fmt
-    combo_cols = {h.split(' ')[1]: get_column_letter(c)
-                  for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1) if h.startswith('全年車-秒')}
-    base_cols = {h.split(' ')[1]: get_column_letter(c)
-                 for c, (h, _, _) in enumerate(_BENEFIT_DETAIL_COLS, 1) if h.startswith('全年基準')}
+    def _combo_cols(prefix):
+        return {h.split(' ')[1]: get_column_letter(c)
+                for c, (h, _, _) in enumerate(cols, 1) if h.split(' ')[0] == prefix}
+    combo_cols, base_cols = _combo_cols('全年車-秒'), _combo_cols('全年基準')
+    tt_cols, tt_base_cols = _combo_cols('全年旅行車-秒'), _combo_cols('全年旅行基準')
     ws_det.freeze_panes = 'C2'
 
     # 使用日期（每列一個日期；平均值取這些日期中有資料者）
@@ -833,15 +868,19 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
         cell.alignment = Alignment(wrap_text=True, horizontal='center', vertical='center')
         ws_sum.column_dimensions[get_column_letter(j)].width = 24
     ws_sum.row_dimensions[top].height = 48
-    for k, (label, _, _) in enumerate(_BENEFIT_STEPS):
+    steps = _BENEFIT_STEPS + (_BENEFIT_TT_STEPS if has_tt else [])
+    for k, (label, _, _) in enumerate(steps):
         ws_sum.cell(top + 1 + k, 1, label).font = FONT_BOLD
+    _sum = lambda cc, c: f"SUM(各時段!{cc[c]}2:{cc[c]}{n + 1})" if n else '0'
     for j, (d, s) in enumerate(COMBOS, 2):
         col = get_column_letter(j)
-        r = [f'{col}{top + 1 + k}' for k in range(len(_BENEFIT_STEPS))]
-        tot = f"SUM(各時段!{combo_cols[d + s]}2:{combo_cols[d + s]}{n + 1})" if n else '0'
-        base = f"SUM(各時段!{base_cols[d + s]}2:{base_cols[d + s]}{n + 1})" if n else '1'
-        for k, (_, tmpl, fmt) in enumerate(_BENEFIT_STEPS):
-            cell = ws_sum.cell(top + 1 + k, j, tmpl.format(tot=tot, base=base, p=p_cell, r=r))
+        r = [f'{col}{top + 1 + k}' for k in range(len(steps))]
+        tot = _sum(combo_cols, d + s)
+        base = _sum(base_cols, d + s) if n else '1'
+        ttot = _sum(tt_cols, d + s) if has_tt else ''
+        tbase = _sum(tt_base_cols, d + s) if has_tt else ''
+        for k, (_, tmpl, fmt) in enumerate(steps):
+            cell = ws_sum.cell(top + 1 + k, j, tmpl.format(tot=tot, base=base, ttot=ttot, tbase=tbase, p=p_cell, r=r))
             cell.number_format = fmt
             cell.font = FONT_BOLD if f'{d}{s}' == best else FONT_NORMAL
             if f'{d}{s}' == best:
@@ -856,10 +895,15 @@ def build_benefit_xlsx(detail: pd.DataFrame, best: str, cfg: dict, meta: dict[st
         '改善率 = 全年效益值 ÷ 全年基準（A 基準 = 事前總延滯；B 基準 = 事前每車延滯 × 事後通過量，同樣放大到全年）；'
         '油耗、CO2 與停等時間成正比，三者改善率相同。',
         '人-分鐘 = 車-小時 × 小客車都會平均乘載率 × 60（每車皆以小客車乘載率計）。',
+    ] + ([
+        '減少旅行時間：T = 總加權旅行時間（Σ 路徑旅行時間 × 代表路段流量，車-秒），W = T ÷ 加權平均旅行時間；'
+        '以 T、W 代入 D、V 算同樣的組合，人-分鐘 = 全年車-秒 ÷ 3600 × 乘載率 × 60。系統層級，'
+        '只加總有旅行時間資料的時段；旅行時間已含停等延滯，不計入貨幣化效益。',
+    ] if has_tt else []) + [
         '停等延滯為大車＋小車實際車數（未換算小客車當量、不含機車），油耗以小客車怠速油耗率估算。',
         '各時段使用的事前／事後日期見「使用日期」工作表；公式與參數出處詳見「各時段」「參數」工作表，及 ai-signal-perf/doc/全年效益估算說明.md。',
     ]
-    row = top + len(_BENEFIT_STEPS) + 2
+    row = top + len(steps) + 2
     for t in notes:
         ws_sum.cell(row, 1, t).font = FONT_NORMAL
         row += 1

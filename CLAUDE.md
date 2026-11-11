@@ -25,6 +25,7 @@ performance_comparison_app.py   主程式（Streamlit UI、狀態管理）
 - 每日效益值 A（總延滯相減）／B（平均延滯差 × 事後通過量）× 全年化 1（只計實測時段）／2（時數放大至全日），
   四種組合都算，採全年貨幣化效益最高者（使用者決定，2026-11-06）
 - `build_benefit_xlsx` 匯出的數值都是 Excel 公式；`tests/test_benefit_logic.py` 以 Excel 範本「大竹二期」驗算
+- 有「總加權旅行時間」欄的場域（四期）另算減少旅行時間（人-分鐘/年）：T、W 代入同樣四種組合，不計入貨幣化（`period_tt_means`，說明文件 4.1 節）
 
 ### data_loader.py
 
