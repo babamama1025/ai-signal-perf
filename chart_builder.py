@@ -144,10 +144,9 @@ def make_daily_trend_chart(
     daily: pd.DataFrame,
     group_means: dict[str, float],
     title: str,
-    closed_dates: set | None = None,
 ) -> go.Figure:
     """每日趨勢圖：事前／事後以長條呈現（事前後日期常交錯，折線會跨日拉出長直線）、
-    同組平均虛線、異常日標記、AI 關閉日灰底。
+    同組平均虛線、異常日標記。
     daily 為 comparison_logic.analyze_daily 回傳的每日表（資料異常日不畫長條）。"""
     if daily['數值'].notna().sum() == 0:
         return _empty_fig(f"無資料：{title}")
@@ -158,10 +157,6 @@ def make_daily_trend_chart(
     names  = {'事前': '事前（定時）', '事後': '事後（AI）'}
 
     fig = go.Figure()
-    for d in sorted(closed_dates or []):
-        fig.add_vrect(x0=d - pd.Timedelta(hours=12), x1=d + pd.Timedelta(hours=12),
-                      fillcolor='#BBBBBB', opacity=0.25, line_width=0, layer='below')
-
     for label in ('事前', '事後'):
         g = plot_df[plot_df['組別'] == label]
         if g.empty:

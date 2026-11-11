@@ -81,7 +81,7 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 `aisig publish` 產生（修正口徑），流程與口徑見該專案 `docs/使用說明.md` 4.0、4.9 節。**不要手動修改，也不要再用舊程式
 （`perf_analyze`、`2504-BA測試/code`）覆蓋**；改設定要在計算專案的 `sites/*.toml` 改完重算再發佈。
 `perf_summary_N_舊口徑.csv` 是切換前舊程式的版本，只供對照、不再更新。
-`ai_operation_log_N.csv`、`date_selections_N.json` 仍在本網頁編輯。
+`date_selections_N.json` 仍在本網頁編輯（`*_自動更新` 分配由 `aisig publish` 附加新日期）。`ai_operation_log_N.csv`（AI 操作紀錄）2026-11-10 起網頁不再讀取，檔案保留不再維護。
 `data_quality_N.csv`（資料品質註記）同樣由 `aisig publish` 產生：欄位 日期、時段、等級（錯誤／排除／警告）、規則、說明，
 規則與門檻見計算專案 `docs/使用說明.md` 7.9。`data_loader.load_quality`／`quality_notes` 讀取；網頁在日期分配表「資料」欄、
 側邊欄告警（可選擇分析時排除，`QUALITY_EXCLUDE`）、分析結果上方、每日明細「資料註記」欄、全年效益分頁與其 Excel「使用日期」工作表顯示。
@@ -100,8 +100,6 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 | 指標 | 文字 | `總停等延滯`、`通過量`、`平均停等延滯`（CSV 中存在但計算時不直接使用） |
 | 後續欄 | 數值 | 由程式自動偵測（系統總量、路口聚合、來向、廊道） |
 
-`ai_operation_log_N.csv`（UTF-8 BOM）：日期、時段、狀態、備註，用於在日曆中標記 AI 啟動狀況。
-
 `date_selections_N.json`：儲存已確認的事前/事後日期分配，格式為 `{period: {before: [...], after: [...]}}`。
 
 ---
@@ -114,7 +112,7 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
   - 其他分頁：隱藏選擇器，關鍵數字為 `aggregate_periods` 的全時段合計
 - 未渲染的 widget 狀態會被 Streamlit 清除，故在 radio 前對 `focus_period` 等 key 自我指派以保留；`daily_k` 以 `setdefault` 初始化（slider 不可再傳 `value`，否則觸發 Session State 重複設定警告），匯出頁直接讀 `st.session_state['daily_k']`
 - 「時段明細」與「每日分析」都依共用選擇器顯示單一時段 × 單一指標；重新分析後若原選擇已不存在，會先從 session_state 清除
-- 未執行分析時：AI 操作紀錄可編輯，其餘分頁顯示提示後 `st.stop()`
+- 未執行分析時：「全年效益」「降階紀錄」照常顯示，其餘分頁顯示提示後 `st.stop()`
 - 每日趨勢圖為長條圖（事前／事後日期常交錯，折線會跨日拉出長直線）
 
 ## Streamlit 狀態管理
@@ -226,13 +224,14 @@ period_special = cl.format_special_metrics(special_raws[period]) if _has_valid_s
 - **切換「只顯示符合日期類型的日期」checkbox** → 補入或移除對應日期列，既有勾選不受影響
 - **載入 preset 補入新日期** → 空白，並顯示提示訊息（含筆數），引導使用者主動用「⚡ 依操作紀錄自動填入」補全
 - 唯一自動勾選入口：使用者主動點選「⚡ 依操作紀錄自動填入」按鈕
+- （2026-11-10）移除 AI 操作紀錄後，自動填入改為「🔍 篩選日期範圍」：事前、事後各設一個日期範圍，**只影響本次分析**（在 `before_by_period`／`after_by_period` 排除範圍外日期，先於資料註記排除），表格勾選與儲存的日期分配不變，放大範圍即恢復計入；範圍外格數以表格下方提示顯示。不要把範圍相關欄位加進 `st.data_editor` 的資料：資料一變，表格上未寫回 `date_df` 的手動勾選會被重設
 
 ---
 
 ## 常見維護場景
 
 ### 新增場域
-1. 在計算專案 `AI_sig_perf_eval` 新增場域設定並設 `[site] publish_name`，以 `aisig publish` 產生 `data/perf_summary_N.csv`；另放 `ai_operation_log_N.csv`，並在 `SITE_OPTIONS`、`LOG_PATHS`、`SELECTION_PATHS` 加上新場域
+1. 在計算專案 `AI_sig_perf_eval` 新增場域設定並設 `[site] publish_name`，以 `aisig publish` 產生 `data/perf_summary_N.csv`；並在 `SITE_OPTIONS`、`SELECTION_PATHS`、`QUALITY_PATHS`、`DEGRADATION_PATHS` 加上新場域
 2. 確認欄位命名符合自動偵測規則（系統欄在路口欄之前、廊道欄含 `->` 或 `路徑`）
 3. 若有「特殊路口子集」需求，確認 `get_system_columns()` 能正確回傳系統總量欄
 

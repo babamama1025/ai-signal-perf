@@ -59,7 +59,6 @@ def build_comparison_xlsx(
     day_type_label: str = '平日',
     daily_df: pd.DataFrame | None = None,
     daily_k: float = 1.5,
-    daily_status_map: dict | None = None,
 ) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
@@ -80,7 +79,7 @@ def build_comparison_xlsx(
             _build_daily_sheet(
                 wb, daily_df, period,
                 before_by_period.get(period, []), after_by_period.get(period, []),
-                include_travel_time, daily_k, daily_status_map or {},
+                include_travel_time, daily_k,
             )
     if raw_df is not None and raw_periods:
         _build_raw_data_sheet(wb, raw_df, before_by_period, after_by_period, raw_periods)
@@ -488,7 +487,7 @@ _DAILY_METRICS = ['平均停等延滯', '總停等延滯', '通過量']
 
 
 def _build_daily_sheet(wb, df, period, before_dates, after_dates,
-                       include_travel_time, k, status_map):
+                       include_travel_time, k):
     """每日明細（列＝日期，欄＝指標×對象），依同組 IQR 判定結果著色，末尾附各組平均與改善率。"""
     ws = wb.create_sheet(('每日_' + period.replace(':', '').replace('~', '-'))[:31])
 
@@ -500,7 +499,7 @@ def _build_daily_sheet(wb, df, period, before_dates, after_dates,
     analyses = {(m, c): analyze_daily(df, period, before_dates, after_dates, m, c, k)
                 for m, c in columns}
 
-    fixed = ['日期', '星期', '組別', 'AI 狀態']
+    fixed = ['日期', '星期', '組別']
     total_cols = len(fixed) + len(columns)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=min(total_cols, 12))
     ws.cell(1, 1, f'{period} 每日明細 │ 異常門檻 IQR×{k:g} │ '
@@ -530,7 +529,6 @@ def _build_daily_sheet(wb, df, period, before_dates, after_dates,
         ws.cell(row, 1, d_str).font = FONT_NORMAL
         ws.cell(row, 2, _fmt_date(d)[-3:-1]).font = FONT_NORMAL
         ws.cell(row, 3, base.at[idx, '組別']).font = FONT_NORMAL
-        ws.cell(row, 4, status_map.get((d_str, period), '—')).font = FONT_NORMAL
         for j, key in enumerate(columns):
             daily = analyses[key][0]
             cell = ws.cell(row, len(fixed) + 1 + j)
