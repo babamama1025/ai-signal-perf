@@ -187,6 +187,27 @@ def quality_notes(q: pd.DataFrame) -> dict[tuple[pd.Timestamp, str], dict]:
     return out
 
 
+def row_note(note: dict | None, reason: str = '') -> str:
+    """日期分配表「註記」欄：資料品質註記 + 自動分配不勾的原因（已存分配 rows 的「原因」，計算專案 aisig publish 寫入）。
+    原因是資料品質、且該格目前仍有錯誤／排除註記時不重複顯示。"""
+    parts = [note['short']] if note else []
+    if reason and not (reason.startswith('資料品質') and note and note['error']):
+        parts.append(f'🚫 {reason}')
+    return '、'.join(parts)
+
+
+REASON_HELP = '''**註記欄的 🚫 = 自動分配（名稱為「…_自動更新」）沒有勾選的原因**
+
+- **國定假日**：週一～五的放假日，交通型態與平常日不同
+- **部分運作**：時段內 AI 只運作一部分時間（動態路口比例介於 20%～70%），不算事前也不算事後
+- **降階過久**：AI 運作的時段內降階超過 30 分鐘
+- **資料品質**：⛔ 無 VD 資料或完整度過低；🚧 外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故、施工）
+- **績效為 0 或缺值**：區域通過量或平均延滯沒有數值
+- **無動態比例資料**：該時段沒有時制紀錄，無法判斷 AI 是否運作
+
+⚠️ 警告（完整度偏低、通過量異常）只是提醒，仍會勾選。手動建立的分配與人工分配的較早日期沒有原因。'''
+
+
 QUALITY_EXCLUDE = ['不排除', '排除「錯誤」與「排除」', '全部排除（含「警告」）']
 
 

@@ -624,6 +624,7 @@ with st.sidebar:
             st.session_state['date_df'] = existing_df
         else:
             # 初次載入、切換場域、切換日期類型 → 全部重建，預設全空白
+            st.session_state.pop('date_reasons', None)
             st.session_state['date_df'] = _make_date_period_df(
                 selected_periods, is_weekend, _filter_by_day_type,
             )
@@ -698,8 +699,9 @@ with st.sidebar:
         _apply_batch(False, False)
 
     _date_df = st.session_state['date_df']
+    _reasons = st.session_state.get('date_reasons', {})   # 載入的分配中自動分配不勾的原因：{(日期, 時段): 原因}
     edited_df = st.data_editor(
-        _date_df.assign(資料=[quality_notes.get((pd.Timestamp(d), p), {}).get('short', '')
+        _date_df.assign(註記=[dl.row_note(quality_notes.get((pd.Timestamp(d), p)), _reasons.get((d, p), ''))
                             for d, p in zip(_date_df['日期'], _date_df['時段'])]),
         key=f'date_editor_{st.session_state["editor_ver"]}',
         column_config={
@@ -708,14 +710,16 @@ with st.sidebar:
             '時段': st.column_config.TextColumn('時段', disabled=True, width='small'),
             '事前': st.column_config.CheckboxColumn('事前', width='small'),
             '事後': st.column_config.CheckboxColumn('事後', width='small'),
-            '資料': st.column_config.TextColumn('資料', disabled=True,
-                                                help='資料品質註記：⛔ 錯誤（無 VD 資料或完整度過低）、⚠️ 警告（完整度偏低或通過量異常，'
-                                                     '也可能是颱風、連假前夕等特殊日）'),
+            '註記': st.column_config.TextColumn('註記', disabled=True,
+                                                help='資料品質註記：⛔ 錯誤（無 VD 資料或完整度過低）、🚧 排除（外部壅塞）、'
+                                                     '⚠️ 警告（完整度偏低或通過量異常，也可能是颱風、連假前夕等特殊日）；'
+                                                     '🚫 自動分配沒有勾選的原因（說明見表格下方）'),
         },
         hide_index=True,
         height=400,
         use_container_width=True,
-    ).drop(columns='資料')
+    ).drop(columns='註記')
+    st.caption('日期排除原因說明', help=dl.REASON_HELP)
 
     before_by_period: dict[str, list] = {}
     after_by_period:  dict[str, list] = {}
@@ -781,7 +785,7 @@ with st.sidebar:
                         '時段': r['時段'],
                         '事前': bool(r['事前']),
                         '事後': bool(r['事後']),
-                    }
+                    } | ({'原因': _reasons[(r['日期'], r['時段'])]} if (r['日期'], r['時段']) in _reasons else {})
                     for r in edited_df.to_dict('records')
                 ],
             }
@@ -841,7 +845,8 @@ with st.sidebar:
         st.session_state[periods_widget_key] = valid_periods
         st.session_state['_periods_key'] = (selected_site, preset['day_type'], tuple(sorted(valid_periods)), filter_by_type)
         st.session_state['date_df'] = base_df
-        load_msg = f'✅ 已載入「{preset["name"]}」（{preset["day_type"]}，儲存於 {preset["saved_at"]}）'
+        st.session_state['date_reasons'] = {(r['日期'], r['時段']): r['原因'] for r in preset['rows'] if r.get('原因')}
+        load_msg =f'✅ 已載入「{preset["name"]}」（{preset["day_type"]}，儲存於 {preset["saved_at"]}）'
         if new_date_count > 0:
             load_msg += f'；已補入 {new_date_count} 筆新日期（未勾選）'
         st.session_state['_save_load_msg'] = load_msg

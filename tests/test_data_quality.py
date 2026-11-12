@@ -43,3 +43,13 @@ def test_flagged_rows(tmp_path):
     rows = dl.flagged_rows(notes, {'07:00~09:00': ([pd.Timestamp('2026-10-13')], [pd.Timestamp('2026-10-19')])})
     assert [r['等級'] for r in rows] == ['錯誤', '排除']
     assert dl.flag_counts(rows) == '⛔ 錯誤 1、🚧 排除 1、⚠️ 警告 0'
+
+
+def test_row_note(tmp_path):
+    notes = _notes(tmp_path)
+    warn = notes[(pd.Timestamp('2026-09-22'), '17:00~19:00')]
+    drop = notes[(pd.Timestamp('2026-10-19'), '07:00~09:00')]
+    assert dl.row_note(None) == '' and dl.row_note(None, '國定假日') == '🚫 國定假日'
+    assert dl.row_note(warn, '部分運作（動態比例 0.51）') == '⚠️ 完整度低、⚠️ 通過量異常、🚫 部分運作（動態比例 0.51）'
+    assert dl.row_note(drop, '資料品質：外部壅塞') == '🚧 外部壅塞'            # 已有錯誤／排除註記，不重複
+    assert dl.row_note(None, '資料品質：外部壅塞') == '🚫 資料品質：外部壅塞'   # 註記後來消失時仍看得到當時的原因

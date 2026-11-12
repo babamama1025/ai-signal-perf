@@ -84,7 +84,7 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 `perf_summary_N_舊口徑.csv` 是切換前舊程式的版本，只供對照、不再更新。
 `date_selections_N.json` 仍在本網頁編輯（`*_自動更新` 分配由 `aisig publish` 附加新日期）。`ai_operation_log_N.csv`（AI 操作紀錄）2026-11-10 起網頁不再讀取，檔案保留不再維護。
 `data_quality_N.csv`（資料品質註記）同樣由 `aisig publish` 產生：欄位 日期、時段、等級（錯誤／排除／警告）、規則、說明，
-規則與門檻見計算專案 `docs/使用說明.md` 7.9。`data_loader.load_quality`／`quality_notes` 讀取；網頁在日期分配表「資料」欄、
+規則與門檻見計算專案 `docs/使用說明.md` 7.9。`data_loader.load_quality`／`quality_notes` 讀取；網頁在日期分配表「註記」欄、
 側邊欄告警（可選擇分析時排除，`QUALITY_EXCLUDE`）、分析結果上方、每日明細「資料註記」欄、全年效益分頁與其 Excel「使用日期」工作表顯示。
 「排除」是外部壅塞（路網全面壅塞且非車流增加，如高速公路管制、事故、施工），與「錯誤」一樣在第二個排除選項就排除。
 排除只影響當次分析，不改日期分配的勾選；檔案不存在時視為沒有註記。
@@ -102,6 +102,11 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 | 後續欄 | 數值 | 由程式自動偵測（系統總量、路口聚合、來向、廊道） |
 
 `date_selections_N.json`：儲存已確認的事前/事後日期分配，格式為 `{period: {before: [...], after: [...]}}`。
+
+`*_自動更新` 分配中沒有勾選的列帶有 `原因` 欄位（計算專案 `aisig publish` 寫入，如「國定假日」「部分運作（動態比例 0.51）」；
+規則見計算專案 `docs/使用說明.md` 4.9）。載入分配時存到 `st.session_state['date_reasons']`，日期分配表「註記」欄以 🚫 顯示
+（`data_loader.row_note`，與資料品質註記合併），儲存時原樣寫回；表格下方「日期排除原因說明」的問號說明是 `data_loader.REASON_HELP`，
+其中的門檻（20%、70%、30 分鐘）要與計算專案 `sites/*.toml` 的 `[selection]` 一致。
 
 ---
 
