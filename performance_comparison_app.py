@@ -63,6 +63,12 @@ DEGRADATION_PATHS = {
     '桃園三期(高鐵)': 'degradation_daily_3.csv',
 }
 
+# 各場域的各路口逐時運作狀態（計算專案 aisig publish 產生）
+AI_MODE_PATHS = {
+    '桃園四期(大湳)': 'ai_mode_4.csv',
+    '桃園三期(高鐵)': 'ai_mode_3.csv',
+}
+
 # ── 旅行時間指標說明（popover 用）────────────────────────────────────────────
 _TT_METRIC_INFO_MD = """
 #### 一、平均旅行時間
@@ -447,6 +453,7 @@ CSV_PATH       = DATA_DIR / _selected_data_file
 SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
 QUALITY_PATH   = DATA_DIR / QUALITY_PATHS[selected_site]
 DEGRADATION_PATH = DATA_DIR / DEGRADATION_PATHS[selected_site]
+AI_MODE_PATH   = DATA_DIR / AI_MODE_PATHS[selected_site]
 
 if not CSV_PATH.exists():
     st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
@@ -1000,6 +1007,41 @@ _DEG_HELP = (
 )
 
 
+_AI_MODE_HELP = (
+    '來源：平台時制紀錄（timePlanRecord），由計算專案 `aisig publish` 產生。'
+    '逐週期判斷：每個週期取前後共 5 個週期的判斷分相總秒數算標準差，超過門檻（3 秒）為動態（AI），否則為定時（TOD）；'
+    '判斷分相與計算專案的 AI 判斷相同。\n\n'
+    '- 格內數字＝該格判為 AI 的分鐘數。\n'
+    '- 顏色：全部動態＝AI（綠）、全部定時＝TOD（紅）、兩者都有＝部分AI（黃）、沒有紀錄或資料不足＝未知（灰）。\n'
+    '- 定時換時制計畫的前後幾個週期會被判為動態，可能出現短暫的部分AI。\n'
+    '- 只供檢視；績效的日期分配依計算專案的 AI 判斷，不受此頁影響。'
+)
+_AI_MODE_COLOR = {dl.MODE_AI: '#c6efce', dl.MODE_TOD: '#ffc7ce', dl.MODE_MIXED: '#ffeb9c', dl.MODE_UNKNOWN: '#d9d9d9'}
+
+
+@st.cache_data(show_spinner='載入逐時運作狀態中…')
+def _load_ai_mode(path: str, _mtime: float):
+    return dl.load_ai_mode(path)
+
+
+def _render_ai_mode_view():
+    d = _load_ai_mode(str(AI_MODE_PATH), AI_MODE_PATH.stat().st_mtime if AI_MODE_PATH.exists() else 0)
+    if d.empty:
+        st.info(f'尚無逐時運作狀態（`data/{AI_MODE_PATH.name}`，由計算專案 aisig publish 產生）。')
+        return
+    st.markdown(_esc_md(_AI_MODE_HELP))
+    days = sorted(d['日期'].unique(), reverse=True)
+    c1, c2 = st.columns([2, 3])
+    day = c1.selectbox('日期', days, key=f'ai_mode_day_{selected_site}',
+                       format_func=lambda x: f'{x:%Y-%m-%d}（{dl.TW_WEEKDAY[x.weekday()]}）')
+    m = c2.radio('每格', [60, 15, 5], index=1, horizontal=True, format_func=lambda x: f'{x} 分鐘', key='ai_mode_slot')
+    ai, state = dl.ai_mode_grid(d, pd.Timestamp(day), m)
+    color = state.map(lambda v: f'background-color: {_AI_MODE_COLOR[v]}; color: #000')
+    st.dataframe(ai.style.apply(lambda _: color, axis=None).format('{:.0f}', na_rep=''),
+                 height=35 * len(ai) + 38)
+    st.caption('🟩 AI　🟥 TOD　🟨 部分AI　⬜ 未知')
+
+
 def _render_degradation_view():
     d = dl.load_degradation(DEGRADATION_PATH)
     if d.empty:
@@ -1211,14 +1253,18 @@ for _k in ('focus_period', 'focus_metric', 'show_directions', 'daily_scope', 'da
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 
-VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_DEGRADE, VIEW_EXPORT = (
-    '📊 總覽', '🔍 時段明細', '📅 每日分析', '🌱 全年效益', '📉 降階紀錄', '💾 匯出')
-view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_DEGRADE, VIEW_EXPORT],
+VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_AI_MODE, VIEW_DEGRADE, VIEW_EXPORT = (
+    '📊 績效總覽', '🔍 路口來向績效明細', '📅 每日績效分析', '🌱 全年效益', '🚥 各路口逐時運作狀態', '📉 降階紀錄', '💾 匯出')
+view = st.radio('分頁', [VIEW_OVERVIEW, VIEW_DETAIL, VIEW_DAILY, VIEW_BENEFIT, VIEW_AI_MODE, VIEW_DEGRADE, VIEW_EXPORT],
                 horizontal=True, key='main_view', label_visibility='collapsed')
 
 # ── 全年效益估算（直接讀已儲存的平日／假日日期分配，不需先執行分析）──────────────
 if view == VIEW_BENEFIT:
     _render_benefit_view()
+
+# ── 各路口逐時運作狀態（讀計算專案發佈的逐週期判斷區段，不需先執行分析）──────────
+if view == VIEW_AI_MODE:
+    _render_ai_mode_view()
 
 # ── 降階紀錄（讀計算專案發佈的每日降階統計，不需先執行分析）──────────────────────
 if view == VIEW_DEGRADE:
@@ -1236,7 +1282,7 @@ if st.session_state['analysis_results'] is None:
 4. 視需要勾選「包含旅行時間」
 5. 點擊「執行分析」
 """)
-    elif view not in (VIEW_BENEFIT, VIEW_DEGRADE):
+    elif view not in (VIEW_BENEFIT, VIEW_AI_MODE, VIEW_DEGRADE):
         st.info('請先在左側設定分析條件並點擊「執行分析」。')
     st.stop()
 
@@ -1249,7 +1295,7 @@ periods         = saved['periods']
 inc_tt          = saved['include_tt']
 special_raws    = saved.get('special_raws', {})
 
-if view not in (VIEW_BENEFIT, VIEW_DEGRADE) and saved.get('quality_flags'):
+if view not in (VIEW_BENEFIT, VIEW_AI_MODE, VIEW_DEGRADE) and saved.get('quality_flags'):
     _qf = saved['quality_flags']
     st.warning(f"本次分析使用的日期中有 {len(_qf)} 格有資料註記（{dl.flag_counts(_qf)}；"
                f"設定：{saved['quality_mode']}），結果可能受影響。可在左側「日期分配」下方選擇排除後重新分析。")
@@ -1257,7 +1303,7 @@ if view not in (VIEW_BENEFIT, VIEW_DEGRADE) and saved.get('quality_flags'):
         st.dataframe(pd.DataFrame(_qf), hide_index=True, use_container_width=True)
 
 
-# ── 共用選擇器（時段明細、每日分析共用）＋ 系統層級關鍵數字 ──────────────────────
+# ── 共用選擇器（路口來向績效明細、每日績效分析共用）＋ 系統層級關鍵數字 ──────────────────────
 _focus_metrics = ['平均停等延滯', '總停等延滯', '通過量'] + (['旅行時間'] if inc_tt else [])
 # 重新分析後時段或指標清單可能改變，失效的選擇先清除，避免 selectbox 取到不存在的值
 if st.session_state.get('focus_period') not in periods:
@@ -1266,16 +1312,16 @@ if st.session_state.get('focus_metric') not in _focus_metrics:
     st.session_state.pop('focus_metric', None)
 
 overview_all = cl.aggregate_periods(all_results, periods, include_travel_time=inc_tt, extra_entities=extra_entities)
-# 時段明細／每日分析：顯示選擇器，橫幅為所選時段；其餘分頁：隱藏選擇器，橫幅為全時段合計
+# 路口來向績效明細／每日績效分析：顯示選擇器，橫幅為所選時段；其餘分頁：隱藏選擇器，橫幅為全時段合計
 _focus_view = view in (VIEW_DETAIL, VIEW_DAILY)
 
 with focus_box:
     if _focus_view:
         _fc1, _fc2, _fc3 = st.columns([2, 2, 2])
         focus_period = _fc1.selectbox('時段', periods, key='focus_period',
-                                      help='「時段明細」與「每日分析」分頁共用此設定')
+                                      help='「路口來向績效明細」與「每日績效分析」分頁共用此設定')
         focus_metric = _fc2.selectbox('指標', _focus_metrics, key='focus_metric',
-                                      help='「時段明細」與「每日分析」分頁共用此設定')
+                                      help='「路口來向績效明細」與「每日績效分析」分頁共用此設定')
         _fc3.markdown('<div style="height: 1.9rem"></div>', unsafe_allow_html=True)
         show_directions = _fc3.checkbox('顯示全方向績效', value=False, key='show_directions',
                                         help='勾選後，表格與圖表會加入各路口來向（A/B/…）欄位；預設僅顯示系統與路口層級。')
@@ -1311,7 +1357,7 @@ with focus_box:
     else:
         st.caption('關鍵數字為所有已選時段的系統層級合計（延滯與通過量加總、旅行時間取各時段平均）；綠色＝改善。')
 
-# ── 總覽 ──────────────────────────────────────────────────────────────────────
+# ── 績效總覽 ──────────────────────────────────────────────────────────────────────
 if view == VIEW_OVERVIEW:
     # ── 頂部摘要指標（各時段事前／事後天數可能不同，逐時段列出）──────────────────
     summary_rows = [
@@ -1349,7 +1395,7 @@ if view == VIEW_OVERVIEW:
         st.markdown(cl.generate_analysis_text(all_results, before_counts, after_counts))
 
 
-# ── 時段明細：依共用選擇器顯示單一時段 × 單一指標 ────────────────────────────
+# ── 路口來向績效明細：依共用選擇器顯示單一時段 × 單一指標 ────────────────────────────
 _approach_col_set = set(dl.get_approach_columns())
 
 if view == VIEW_DETAIL:
@@ -1505,7 +1551,7 @@ if view == VIEW_EXPORT:
         '包含每日明細工作表',
         value=True,
         help='每個時段一張「每日_」工作表：列出系統、路口（與旅行時間）的每日數值，'
-             '並依「每日分析」分頁的「異常門檻」設定標示明顯較差／較好的日期',
+             '並依「每日績效分析」分頁的「異常門檻」設定標示明顯較差／較好的日期',
     )
     include_deg = st.checkbox(
         '包含降階紀錄工作表',

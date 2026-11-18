@@ -5,6 +5,7 @@
 不含任何硬編碼的欄位名稱或位置。
 """
 import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 
@@ -265,3 +266,48 @@ def degradation_monthly(d: pd.DataFrame) -> pd.DataFrame:
     out['日均小時制次數'] = (out['小時制降階次數'] / out['天數']).round(2)
     out['日均降階分鐘'] = (g['降階分鐘'].mean()).round(1)
     return out.rename_axis('月份').reset_index()
+
+
+# ── 各路口逐時運作狀態（計算專案 aisig publish 產生 ai_mode_N.csv）──────────────
+# 每列為一個路口連續同模式的區段：日期、路口、起、迄（當日 HH:MM:SS，迄可為 24:00:00）、模式（A＝動態、T＝定時）。
+# 判斷方式見計算專案 timing.cycle_modes／mode_runs；格子換算與計算專案 timing.slot_states 相同。
+AI_MODE_COLS = ['日期', '路口', '起', '迄', '模式']
+MODE_AI, MODE_TOD, MODE_MIXED, MODE_UNKNOWN = 'AI', 'TOD', '部分AI', '未知'
+
+
+def load_ai_mode(path: str | Path) -> pd.DataFrame:
+    """讀取逐時運作狀態區段，起、迄轉為當日秒數；檔案不存在時回傳空表。"""
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame(columns=AI_MODE_COLS)
+    d = pd.read_csv(path, encoding='utf-8-sig', dtype=str)
+    d['日期'] = pd.to_datetime(d['日期'])
+    for c in ('起', '迄'):
+        d[c] = pd.to_timedelta(d[c]).dt.total_seconds().astype(int)
+    return d
+
+
+def ai_mode_grid(d: pd.DataFrame, day: pd.Timestamp, slot_minutes: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """某日 → (各路口各時槽判為 AI 的分鐘數, 狀態)，列＝路口（依檔內首次出現順序，含當日無資料者）、欄＝時槽起點。
+
+    狀態：格內有效時間全部動態＝AI、全部定時＝TOD、兩者都有＝部分AI、沒有有效時間＝未知（分鐘數為空）。
+    部分AI 的分鐘數四捨五入後限制在 1 ~ 格寬−1，不顯示成 0 或滿格。"""
+    slot = slot_minutes * 60
+    n = 86400 // slot
+    labels = list(dict.fromkeys(d['路口']))
+    cols = [f'{i * slot_minutes // 60:02d}' if slot_minutes == 60 else
+            f'{i * slot_minutes // 60:02d}:{i * slot_minutes % 60:02d}' for i in range(n)]
+    ai = pd.DataFrame(np.nan, index=labels, columns=cols)
+    state = pd.DataFrame(MODE_UNKNOWN, index=labels, columns=cols)
+    for lab, g in d[d['日期'] == day].groupby('路口', sort=False):
+        code = np.zeros(86400, dtype=np.int8)                  # 0 無、1 定時、2 動態
+        for a, b, m in zip(g['起'].clip(0, 86400), g['迄'].clip(0, 86400), g['模式']):
+            code[a:b] = 2 if m == 'A' else 1
+        code = code.reshape(n, slot)
+        a_min, v_min = (code == 2).sum(axis=1) / 60, (code > 0).sum(axis=1) / 60
+        s = np.select([v_min == 0, a_min == v_min, a_min == 0], [MODE_UNKNOWN, MODE_AI, MODE_TOD], MODE_MIXED)
+        shown = np.round(a_min)
+        shown = np.where(s == MODE_MIXED, np.clip(shown, 1, slot_minutes - 1), shown)
+        ai.loc[lab] = np.where(v_min == 0, np.nan, shown)
+        state.loc[lab] = s
+    return ai, state

@@ -91,6 +91,10 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 `degradation_daily_N.csv`（每日降階統計）同樣由 `aisig publish` 產生：欄位 日期、星期、降階次數、小時制降階次數（同小時計 1 次）、
 降階小時區間、降階分鐘（同時發生不重複計）、主要原因，口徑見計算專案 `docs/使用說明.md` 7.4。`data_loader.load_degradation`／
 `degradation_monthly` 讀取與月彙總；「📉 降階紀錄」分頁（`_render_degradation_view`）不需先執行分析，在 `st.stop()` 之前渲染。
+`ai_mode_N.csv`（各路口逐時運作狀態）同樣由 `aisig publish` 產生：每列為一個路口連續同模式的區段，欄位 日期、路口（編號 名稱）、
+起、迄（當日 HH:MM:SS，迄可為 24:00:00）、模式（A＝動態、T＝定時），判斷方式見計算專案 `docs/使用說明.md` 4.9。
+`data_loader.load_ai_mode`／`ai_mode_grid` 讀取並換算成路口 × 時槽（60／15／5 分鐘；換算同計算專案 `timing.slot_states`，兩邊要一致），
+列順序＝檔內路口首次出現順序；「🚥 各路口逐時運作狀態」分頁（`_render_ai_mode_view`）不需先執行分析，在 `st.stop()` 之前渲染。
 
 `performance_summary.csv`（UTF-8）必要欄位：
 
@@ -114,11 +118,12 @@ DERIVED_METRICS = {'平均停等延滯': ('總停等延滯', '通過量')}
 
 - 分頁以橫向 `st.radio`（key `main_view`）實作而非 `st.tabs`，因為需依目前分頁切換橫幅；只渲染目前分頁
 - 分頁上方 `focus_box`（分析後才填入）：
-  - 「時段明細」「每日分析」：共用選擇器（`focus_period`、`focus_metric`、`show_directions`）＋ 所選時段的系統層級關鍵數字
+  - 「路口來向績效明細」「每日績效分析」：共用選擇器（`focus_period`、`focus_metric`、`show_directions`）＋ 所選時段的系統層級關鍵數字
   - 其他分頁：隱藏選擇器，關鍵數字為 `aggregate_periods` 的全時段合計
 - 未渲染的 widget 狀態會被 Streamlit 清除，故在 radio 前對 `focus_period` 等 key 自我指派以保留；`daily_k` 以 `setdefault` 初始化（slider 不可再傳 `value`，否則觸發 Session State 重複設定警告），匯出頁直接讀 `st.session_state['daily_k']`
-- 「時段明細」與「每日分析」都依共用選擇器顯示單一時段 × 單一指標；重新分析後若原選擇已不存在，會先從 session_state 清除
-- 未執行分析時：「全年效益」「降階紀錄」照常顯示，其餘分頁顯示提示後 `st.stop()`
+- 「路口來向績效明細」與「每日績效分析」都依共用選擇器顯示單一時段 × 單一指標；重新分析後若原選擇已不存在，會先從 session_state 清除
+- 分頁順序：績效總覽、路口來向績效明細、每日績效分析、全年效益、各路口逐時運作狀態、降階紀錄、匯出
+- 未執行分析時：「全年效益」「各路口逐時運作狀態」「降階紀錄」照常顯示，其餘分頁顯示提示後 `st.stop()`
 - 每日趨勢圖為長條圖（事前／事後日期常交錯，折線會跨日拉出長直線）
 
 ## Streamlit 狀態管理
