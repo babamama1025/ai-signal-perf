@@ -1,8 +1,6 @@
 """AI 號誌事前後分析系統 (Streamlit 應用程式)"""
-import io
 import json
 import base64
-import hashlib
 import requests
 import streamlit as st
 import pandas as pd
@@ -382,12 +380,6 @@ def _load_df(csv_path: str, _mtime: float):
     return df, dict(dl.get_column_structure())
 
 
-@st.cache_data(show_spinner='載入績效資料中…')
-def _load_df_bytes(content: bytes, _hash: str):
-    df = dl.load_performance_csv(io.BytesIO(content))
-    return df, dict(dl.get_column_structure())
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def _get_file_last_commit_date(rel_path: str) -> str | None:
     """透過 GitHub API 查詢檔案最後一次 commit 的日期（YYYY/MM/DD）。"""
@@ -417,15 +409,7 @@ st.sidebar.title('🚦 分析設定')
 st.sidebar.subheader('🗺️ 場域選擇')
 selected_site = st.sidebar.selectbox('選擇分析場域', list(SITE_OPTIONS.keys()))
 
-# 上傳自訂檔案（優先度最高；上傳時下方 selectbox 自動 disable）
-uploaded_csv = st.sidebar.file_uploader(
-    '📂 上傳自訂資料檔（選用）',
-    type='csv',
-    key=f'custom_csv_{selected_site}',
-    help='上傳後優先使用此檔案，下方目錄選擇無效；日期分配仍依場域設定',
-)
-
-# 從 data/ 目錄選擇其他績效檔案（切換場域時自動重設）
+# 從 data/ 目錄選擇其他績效檔案（切換場域時自動重設；少用，收合）
 # 排除其他場域的預設檔，避免誤選
 _other_defaults = {v for k, v in SITE_OPTIONS.items() if k != selected_site}
 _avail_csvs     = sorted(
@@ -433,17 +417,13 @@ _avail_csvs     = sorted(
     if p.name not in _other_defaults
 )
 _default_csv   = SITE_OPTIONS[selected_site]
-_selected_data_file = st.sidebar.selectbox(
-    '📊 或選擇 data/ 目錄下的資料檔',
-    options=_avail_csvs if _avail_csvs else [_default_csv],
-    index=(_avail_csvs.index(_default_csv) if _default_csv in _avail_csvs else 0),
-    key=f'data_file_{selected_site}',
-    disabled=uploaded_csv is not None,
-    help='上傳自訂檔案時此選擇無效',
-)
-_active_file = uploaded_csv.name if uploaded_csv is not None else _selected_data_file
-st.sidebar.caption(f'使用資料檔：{_active_file}')
-st.sidebar.divider()
+with st.sidebar.expander('📊 其他資料檔'):
+    _selected_data_file = st.selectbox(
+        '選擇 data/ 目錄下的資料檔',
+        options=_avail_csvs if _avail_csvs else [_default_csv],
+        index=(_avail_csvs.index(_default_csv) if _default_csv in _avail_csvs else 0),
+        key=f'data_file_{selected_site}',
+    )
 
 # 偵測場域切換，重置日期與分析結果
 if st.session_state.get('_current_site') != selected_site:
@@ -462,33 +442,16 @@ if st.session_state.get('_current_data_file') != _selected_data_file:
     st.session_state.pop('analysis_results', None)
     st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
-# 偵測上傳檔案變更（新增或移除），重置日期與分析結果
-_upload_content = uploaded_csv.getvalue() if uploaded_csv is not None else None
-_upload_hash    = hashlib.md5(_upload_content).hexdigest() if _upload_content else None
-if st.session_state.get('_uploaded_csv_hash') != _upload_hash:
-    st.session_state['_uploaded_csv_hash'] = _upload_hash
-    st.session_state.pop('date_df', None)
-    st.session_state.pop('_periods_key', None)   # 強制觸發 date_df 重建
-    st.session_state.pop('analysis_results', None)
-    st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
-
 # 載入當前場域資料
 CSV_PATH       = DATA_DIR / _selected_data_file
 SELECTION_PATH = DATA_DIR / SELECTION_PATHS[selected_site]
 QUALITY_PATH   = DATA_DIR / QUALITY_PATHS[selected_site]
 DEGRADATION_PATH = DATA_DIR / DEGRADATION_PATHS[selected_site]
 
-if _upload_content is not None:
-    try:
-        df, col_struct = _load_df_bytes(_upload_content, _upload_hash)
-    except Exception as _e:
-        st.error(f'上傳的 CSV 格式有誤，無法讀取：{_e}')
-        st.stop()
-else:
-    if not CSV_PATH.exists():
-        st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
-        st.stop()
-    df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
+if not CSV_PATH.exists():
+    st.error(f'找不到資料檔案：{CSV_PATH.name}，請確認已上傳至正確位置。')
+    st.stop()
+df, col_struct = _load_df(str(CSV_PATH), CSV_PATH.stat().st_mtime)
 dl._col_structure = col_struct          # 還原模組層級快取（繞過 st.cache_data）
 
 all_dates      = dl.get_available_dates(df)
@@ -539,8 +502,8 @@ with st.sidebar:
     st.caption(f'資料更新：{_update_str}')
     st.divider()
 
-    # ── 日期類型（平日 / 假日）────────────────────────────────────────────
-    st.subheader('📅 日期類型')
+    # ── 日期類型與分析時段（時段依場域與日期類型預設）──────────────────
+    st.subheader('📅 日期類型與時段')
     day_type = st.radio(
         '分析日期類型',
         ['平常日（一～五）', '週末（六、日）'],
@@ -550,11 +513,7 @@ with st.sidebar:
     )
     is_weekend = (day_type == '週末（六、日）')
 
-    st.divider()
-
-    # ── 分析時段（依場域與日期類型預設）─────────────────────────────────
-    st.subheader('📅 分析時段')
-    site_def     = SITE_DEFAULTS.get(selected_site, {})
+    site_def    = SITE_DEFAULTS.get(selected_site, {})
     default_key  = 'periods_weekend' if is_weekend else 'periods_weekday'
     site_def_pds = site_def.get(default_key, ['07:00~09:00', '14:00~16:00', '16:00~19:00'])
     default_periods = [p for p in site_def_pds if p in all_periods]
@@ -569,7 +528,7 @@ with st.sidebar:
         st.session_state[periods_widget_key] = default_periods
 
     selected_periods = st.multiselect(
-        '選擇時段（可多選）',
+        '分析時段（可多選）',
         options=all_periods,
         key=periods_widget_key,   # 切換場域或日期類型時自動重置
     )
@@ -630,170 +589,8 @@ with st.sidebar:
             )
         st.session_state['editor_ver'] = st.session_state.get('editor_ver', 0) + 1
 
-    st.divider()
-
-    # ── 篩選日期範圍（只影響分析，不改變日期分配的勾選）───────────────
-    st.subheader('🔍 篩選日期範圍')
-    st.caption('**只影響本次分析，不改變日期分配的勾選。** 事前、事後各自只計入範圍內已勾選的日期；'
-               '範圍外的勾選仍保留在下方表格，儲存日期分配時也照原本的勾選儲存，範圍放大即恢復計入。')
-    _first, _last = all_dates[0].date(), all_dates[-1].date()
-    range_before = st.date_input('事前範圍', value=(_first, _last), min_value=_first, max_value=_last,
-                                 key=f'range_before_{selected_site}')
-    range_after  = st.date_input('事後範圍', value=(_first, _last), min_value=_first, max_value=_last,
-                                 key=f'range_after_{selected_site}')
-
-    def _in_range(rng, d: pd.Timestamp) -> bool:
-        """日期是否在範圍內；範圍只選了起始日（尚未選完）時視為不篩選。"""
-        return len(rng) != 2 or rng[0] <= d.date() <= rng[1]
-
-    st.divider()
-
-    # ── 日期分配表格 ────────────────────────────────────────────────────────
-    st.subheader('📆 日期分配')
-    st.caption(
-        '每列為一組「日期＋時段」，直接勾選歸入「事前」或「事後」。'
-    )
-
-    if st.button('↺ 重設', use_container_width=True):
-        cleared_df = st.session_state['date_df'].copy()
-        cleared_df['事前'] = False
-        cleared_df['事後'] = False
-        st.session_state['date_df'] = cleared_df
-        st.session_state['editor_ver'] += 1
-        st.rerun()
-
-    st.checkbox(
-        '只顯示符合日期類型的日期',
-        value=True,
-        key='filter_by_day_type',
-        help='取消勾選可同時顯示平常日與週末，適合跨類型比較分析',
-    )
-
-    # ── 批次勾選／取消（一次多選日期）──────────────────────────────────
-    st.caption('批次操作：多選日期後，一次套用到該幾天的所有時段列。')
-    batch_dates = st.multiselect(
-        '選擇日期（可多選）',
-        options=list(dict.fromkeys(st.session_state['date_df']['日期'])),
-        key='batch_select_dates',
-        label_visibility='collapsed',
-        placeholder='選擇要批次操作的日期',
-    )
-    bcol1, bcol2, bcol3 = st.columns(3)
-
-    def _apply_batch(set_before: bool | None, set_after: bool | None):
-        new_df = st.session_state['date_df'].copy()
-        mask = new_df['日期'].isin(batch_dates)
-        if set_before is not None:
-            new_df.loc[mask, '事前'] = set_before
-        if set_after is not None:
-            new_df.loc[mask, '事後'] = set_after
-        st.session_state['date_df'] = new_df
-        st.session_state['editor_ver'] += 1
-        st.rerun()
-
-    if bcol1.button('✅ 設為事前', use_container_width=True, disabled=not batch_dates):
-        _apply_batch(True, False)
-    if bcol2.button('✅ 設為事後', use_container_width=True, disabled=not batch_dates):
-        _apply_batch(False, True)
-    if bcol3.button('✖ 取消勾選', use_container_width=True, disabled=not batch_dates):
-        _apply_batch(False, False)
-
-    _date_df = st.session_state['date_df']
-    _reasons = st.session_state.get('date_reasons', {})   # 載入的分配中自動分配不勾的原因：{(日期, 時段): 原因}
-    edited_df = st.data_editor(
-        _date_df.assign(註記=[dl.row_note(quality_notes.get((pd.Timestamp(d), p)), _reasons.get((d, p), ''))
-                            for d, p in zip(_date_df['日期'], _date_df['時段'])]),
-        key=f'date_editor_{st.session_state["editor_ver"]}',
-        column_config={
-            '日期': st.column_config.TextColumn('日期', disabled=True, width='small'),
-            '星期': st.column_config.TextColumn('星期', disabled=True, width='small'),
-            '時段': st.column_config.TextColumn('時段', disabled=True, width='small'),
-            '事前': st.column_config.CheckboxColumn('事前', width='small'),
-            '事後': st.column_config.CheckboxColumn('事後', width='small'),
-            '註記': st.column_config.TextColumn('註記', disabled=True,
-                                                help='資料品質註記：⛔ 錯誤（無 VD 資料或完整度過低）、🚧 排除（外部壅塞）、'
-                                                     '⚠️ 警告（完整度偏低或通過量異常，也可能是颱風、連假前夕等特殊日）；'
-                                                     '🚫 自動分配沒有勾選的原因（說明見表格下方）'),
-        },
-        hide_index=True,
-        height=400,
-        use_container_width=True,
-    ).drop(columns='註記')
-    st.caption('日期排除原因說明', help=dl.REASON_HELP)
-
-    before_by_period: dict[str, list] = {}
-    after_by_period:  dict[str, list] = {}
-    for p in selected_periods:
-        sub = edited_df[edited_df['時段'] == p]
-        before_by_period[p] = [pd.Timestamp(r) for r in sub.loc[sub['事前'], '日期']]
-        after_by_period[p]  = [pd.Timestamp(r) for r in sub.loc[sub['事後'], '日期']]
-
-    # 篩選日期範圍：只從本次分析排除範圍外的勾選，edited_df（儲存用）不變
-    _n_out_before = _n_out_after = 0
-    for p in selected_periods:
-        _kept_b = [d for d in before_by_period[p] if _in_range(range_before, d)]
-        _kept_a = [d for d in after_by_period[p] if _in_range(range_after, d)]
-        _n_out_before += len(before_by_period[p]) - len(_kept_b)
-        _n_out_after  += len(after_by_period[p]) - len(_kept_a)
-        before_by_period[p], after_by_period[p] = _kept_b, _kept_a
-
-    # 已勾選的日期中有資料品質註記 → 告警，並可選擇分析時排除
-    quality_mode = dl.QUALITY_EXCLUDE[0]
-    _sel_flags = dl.flagged_rows(quality_notes, {p: (before_by_period[p], after_by_period[p]) for p in selected_periods})
-    if _sel_flags:
-        _n_err = sum(r['等級'] != dl.QUALITY_WARN for r in _sel_flags)
-        st.warning(f'已勾選的日期中有 {len(_sel_flags)} 格有資料註記（{dl.flag_counts(_sel_flags)}）')
-        with st.expander('資料註記明細', expanded=_n_err > 0):
-            st.dataframe(pd.DataFrame(_sel_flags), hide_index=True, use_container_width=True)
-        quality_mode = st.radio('分析時有資料註記的日期', dl.QUALITY_EXCLUDE, key='quality_exclude',
-                                help='只影響本次分析，不改變日期分配的勾選；警告可能是特殊交通日而非資料錯誤，請看明細判斷')
-        for p in selected_periods:
-            before_by_period[p] = [d for d in before_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
-            after_by_period[p]  = [d for d in after_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
-
-    if selected_periods:
-        counts_str = '　'.join(
-            f"{_esc_md(p)}：事前{len(before_by_period[p])}／事後{len(after_by_period[p])}"
-            for p in selected_periods
-        )
-        st.caption(f'已選：{counts_str}')
-        if _n_out_before or _n_out_after:
-            st.info(f'依「🔍 篩選日期範圍」，表格中另有事前 {_n_out_before} 格、事後 {_n_out_after} 格勾選'
-                    '在範圍外，不計入本次分析（勾選仍保留，儲存時照原勾選儲存）。')
-
-    st.divider()
-
-    # ── 儲存 / 載入日期分配 ─────────────────────────────────────────────────
-    st.subheader('💾 儲存 / 載入日期分配')
+    # ── 已儲存的日期分配 ──
     saved_selections = _load_selections(SELECTION_PATH)
-
-    save_name = st.text_input('分配名稱', key='save_selection_name', placeholder='例如：早尖峰_2026Q1')
-    if st.button('💾 儲存目前日期分配', use_container_width=True):
-        name = save_name.strip()
-        if not name:
-            st.warning('請先輸入分配名稱')
-        else:
-            new_preset = {
-                'name':     name,
-                'saved_at': datetime.now().strftime('%Y/%m/%d %H:%M'),
-                'day_type': day_type,
-                'periods':  selected_periods,
-                'rows': [
-                    {
-                        '日期': r['日期'],
-                        '星期': r['星期'],
-                        '時段': r['時段'],
-                        '事前': bool(r['事前']),
-                        '事後': bool(r['事後']),
-                    } | ({'原因': _reasons[(r['日期'], r['時段'])]} if (r['日期'], r['時段']) in _reasons else {})
-                    for r in edited_df.to_dict('records')
-                ],
-            }
-            saved_selections = [s for s in saved_selections if s['name'] != name] + [new_preset]
-            synced = _save_selections(SELECTION_PATH, saved_selections)
-            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
-            st.session_state['_save_load_msg'] = f'✅ 已儲存「{name}」{suffix}'
-            st.rerun()
 
     def _apply_load_preset():
         """按鈕的 on_click 回呼：必須在此處（而非按鈕觸發後的一般程式流程）寫入
@@ -883,91 +680,244 @@ with st.sidebar:
 
     if msg := st.session_state.pop('_save_load_msg', None):
         st.success(msg)
-
-    st.divider()
-
-    # ── 編輯日期分配 ─────────────────────────────────────────────────
-    st.subheader('✏️ 編輯日期分配')
-
     if msg := st.session_state.pop('_edit_msg', None):
         st.success(msg)
 
-    if visible_selections:
-        cur_name = st.session_state.get('load_selection_name', '')
-
-        if st.button(f'✏️ 重新命名「{cur_name}」', use_container_width=True):
-            _rename_dialog(cur_name, saved_selections)
-
-        if st.button(f'🗑️ 刪除「{cur_name}」', use_container_width=True):
-            _delete_dialog(cur_name, saved_selections)
-
-    st.download_button(
-        '📤 匯出所有已儲存的日期分配',
-        data=SELECTION_PATH.read_bytes() if SELECTION_PATH.exists() else b'[]',
-        file_name=SELECTION_PATH.name,
-        mime='application/json',
-        use_container_width=True,
-    )
-
-    uploaded_file = st.file_uploader(
-        '📥 匯入日期分配',
-        type='json',
-        key='import_selections_file',
-    )
-    if uploaded_file is not None:
-        try:
-            imported = json.loads(uploaded_file.read().decode('utf-8-sig'))
-            existing_map = {s['name']: s for s in saved_selections}
-            for s in imported:
-                existing_map[s['name']] = s   # 同名者以匯入版本為準
-            merged = list(existing_map.values())
-            synced = _save_selections(SELECTION_PATH, merged)
-            added  = len(merged) - len(saved_selections)
-            suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
-            st.session_state['_edit_msg'] = f'✅ 匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）{suffix}'
-            st.rerun()
-        except Exception as e:
-            st.error(f'匯入失敗：{e}')
-
-    st.divider()
-
-    # 選項
-    st.subheader('⚙️ 選項')
-    include_tt  = st.checkbox('包含旅行時間', value=True)
-    use_special = st.checkbox('計算特殊總停等延滯', value=False)
-    special_int_cols: list[str] = []
-    if use_special:
-        col_groups   = dl.get_column_groups()
-        int_options  = [k for k in col_groups if k not in ('系統總量', '旅行時間廊道')]
-        special_int_cols = st.multiselect(
-            '選擇納入計算的路口',
-            options=int_options,
-            key=f'special_int_cols_{selected_site}',
-            placeholder='請選擇路口…',
+    # ── 日期分配表格（收合，點開檢視／調整勾選）──
+    with st.expander('📆 日期分配表格'):
+        st.caption(
+            '每列為一組「日期＋時段」，直接勾選歸入「事前」或「事後」。'
         )
 
-    if st.button('🔍 診斷 GitHub 連線', key='diag_github'):
-        cfg    = st.secrets.get('github', {})
-        token  = cfg.get('token', '')
-        repo   = cfg.get('repo', '')
-        branch = cfg.get('branch', 'main')
-        st.write(f'**secrets 有 github 區塊：** {bool(cfg)}')
-        st.write(f'**token 長度：** {len(token)}，開頭：`{token[:8] if token else "(空)"}...`')
-        st.write(f'**repo：** `{repo}`')
-        st.write(f'**branch：** `{branch}`')
-        if token and repo:
-            headers = {
-                'Authorization': f'token {token}',
-                'Accept': 'application/vnd.github.v3+json',
-            }
-            test_url = f'https://api.github.com/repos/{repo}'
+        if st.button('↺ 重設', use_container_width=True):
+            cleared_df = st.session_state['date_df'].copy()
+            cleared_df['事前'] = False
+            cleared_df['事後'] = False
+            st.session_state['date_df'] = cleared_df
+            st.session_state['editor_ver'] += 1
+            st.rerun()
+
+        st.checkbox(
+            '只顯示符合日期類型的日期',
+            value=True,
+            key='filter_by_day_type',
+            help='取消勾選可同時顯示平常日與週末，適合跨類型比較分析',
+        )
+
+        # ── 批次勾選／取消（一次多選日期）──────────────────────────────────
+        st.caption('批次操作：多選日期後，一次套用到該幾天的所有時段列。')
+        batch_dates = st.multiselect(
+            '選擇日期（可多選）',
+            options=list(dict.fromkeys(st.session_state['date_df']['日期'])),
+            key='batch_select_dates',
+            label_visibility='collapsed',
+            placeholder='選擇要批次操作的日期',
+        )
+        bcol1, bcol2, bcol3 = st.columns(3)
+
+        def _apply_batch(set_before: bool | None, set_after: bool | None):
+            new_df = st.session_state['date_df'].copy()
+            mask = new_df['日期'].isin(batch_dates)
+            if set_before is not None:
+                new_df.loc[mask, '事前'] = set_before
+            if set_after is not None:
+                new_df.loc[mask, '事後'] = set_after
+            st.session_state['date_df'] = new_df
+            st.session_state['editor_ver'] += 1
+            st.rerun()
+
+        if bcol1.button('✅ 設為事前', use_container_width=True, disabled=not batch_dates):
+            _apply_batch(True, False)
+        if bcol2.button('✅ 設為事後', use_container_width=True, disabled=not batch_dates):
+            _apply_batch(False, True)
+        if bcol3.button('✖ 取消勾選', use_container_width=True, disabled=not batch_dates):
+            _apply_batch(False, False)
+
+        _date_df = st.session_state['date_df']
+        _reasons = st.session_state.get('date_reasons', {})   # 載入的分配中自動分配不勾的原因：{(日期, 時段): 原因}
+        edited_df = st.data_editor(
+            _date_df.assign(註記=[dl.row_note(quality_notes.get((pd.Timestamp(d), p)), _reasons.get((d, p), ''))
+                                for d, p in zip(_date_df['日期'], _date_df['時段'])]),
+            key=f'date_editor_{st.session_state["editor_ver"]}',
+            column_config={
+                '日期': st.column_config.TextColumn('日期', disabled=True, width='small'),
+                '星期': st.column_config.TextColumn('星期', disabled=True, width='small'),
+                '時段': st.column_config.TextColumn('時段', disabled=True, width='small'),
+                '事前': st.column_config.CheckboxColumn('事前', width='small'),
+                '事後': st.column_config.CheckboxColumn('事後', width='small'),
+                '註記': st.column_config.TextColumn('註記', disabled=True,
+                                                    help='資料品質註記：⛔ 錯誤（無 VD 資料或完整度過低）、🚧 排除（外部壅塞）、'
+                                                         '⚠️ 警告（完整度偏低或通過量異常，也可能是颱風、連假前夕等特殊日）；'
+                                                         '🚫 自動分配沒有勾選的原因（說明見表格下方）'),
+            },
+            hide_index=True,
+            height=400,
+            use_container_width=True,
+        ).drop(columns='註記')
+        st.caption('日期排除原因說明', help=dl.REASON_HELP)
+        quality_mode = st.radio('分析時有資料註記的日期', dl.QUALITY_EXCLUDE, key='quality_exclude',
+                                help='只影響本次分析，不改變日期分配的勾選；警告可能是特殊交通日而非資料錯誤，請看明細判斷')
+
+    # ── 儲存／編輯日期分配（收合）──
+    with st.expander('💾 儲存／編輯日期分配'):
+        save_name = st.text_input('分配名稱', key='save_selection_name', placeholder='例如：早尖峰_2026Q1')
+        if st.button('💾 儲存目前日期分配', use_container_width=True):
+            name = save_name.strip()
+            if not name:
+                st.warning('請先輸入分配名稱')
+            else:
+                new_preset = {
+                    'name':     name,
+                    'saved_at': datetime.now().strftime('%Y/%m/%d %H:%M'),
+                    'day_type': day_type,
+                    'periods':  selected_periods,
+                    'rows': [
+                        {
+                            '日期': r['日期'],
+                            '星期': r['星期'],
+                            '時段': r['時段'],
+                            '事前': bool(r['事前']),
+                            '事後': bool(r['事後']),
+                        } | ({'原因': _reasons[(r['日期'], r['時段'])]} if (r['日期'], r['時段']) in _reasons else {})
+                        for r in edited_df.to_dict('records')
+                    ],
+                }
+                saved_selections = [s for s in saved_selections if s['name'] != name] + [new_preset]
+                synced = _save_selections(SELECTION_PATH, saved_selections)
+                suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
+                st.session_state['_save_load_msg'] = f'✅ 已儲存「{name}」{suffix}'
+                st.rerun()
+
+        st.divider()
+
+        if visible_selections:
+            cur_name = st.session_state.get('load_selection_name', '')
+
+            if st.button(f'✏️ 重新命名「{cur_name}」', use_container_width=True):
+                _rename_dialog(cur_name, saved_selections)
+
+            if st.button(f'🗑️ 刪除「{cur_name}」', use_container_width=True):
+                _delete_dialog(cur_name, saved_selections)
+
+        st.download_button(
+            '📤 匯出所有已儲存的日期分配',
+            data=SELECTION_PATH.read_bytes() if SELECTION_PATH.exists() else b'[]',
+            file_name=SELECTION_PATH.name,
+            mime='application/json',
+            use_container_width=True,
+        )
+
+        uploaded_file = st.file_uploader(
+            '📥 匯入日期分配',
+            type='json',
+            key='import_selections_file',
+        )
+        if uploaded_file is not None:
             try:
-                r = requests.get(test_url, headers=headers, timeout=10)
-                st.write(f'**GET /repos/{repo} → HTTP {r.status_code}**')
-                if not r.ok:
-                    st.error(f'錯誤內容：{r.json().get("message", r.text[:200])}')
+                imported = json.loads(uploaded_file.read().decode('utf-8-sig'))
+                existing_map = {s['name']: s for s in saved_selections}
+                for s in imported:
+                    existing_map[s['name']] = s   # 同名者以匯入版本為準
+                merged = list(existing_map.values())
+                synced = _save_selections(SELECTION_PATH, merged)
+                added  = len(merged) - len(saved_selections)
+                suffix = '，已同步至 GitHub ✓' if synced else _github_sync_suffix()
+                st.session_state['_edit_msg'] = f'✅ 匯入完成：共 {len(merged)} 筆（新增 {added} 筆、更新 {len(imported) - added} 筆）{suffix}'
+                st.rerun()
             except Exception as e:
-                st.error(f'連線例外：{type(e).__name__}: {e}')
+                st.error(f'匯入失敗：{e}')
+
+    # ── 進階選項（收合）──
+    with st.expander('⚙️ 進階選項'):
+        # 選項
+        st.markdown('**⚙️ 計算選項**')
+        include_tt  = st.checkbox('包含旅行時間', value=True)
+        use_special = st.checkbox('計算特殊總停等延滯', value=False)
+        special_int_cols: list[str] = []
+        if use_special:
+            col_groups   = dl.get_column_groups()
+            int_options  = [k for k in col_groups if k not in ('系統總量', '旅行時間廊道')]
+            special_int_cols = st.multiselect(
+                '選擇納入計算的路口',
+                options=int_options,
+                key=f'special_int_cols_{selected_site}',
+                placeholder='請選擇路口…',
+            )
+
+        if st.button('🔍 診斷 GitHub 連線', key='diag_github'):
+            cfg    = st.secrets.get('github', {})
+            token  = cfg.get('token', '')
+            repo   = cfg.get('repo', '')
+            branch = cfg.get('branch', 'main')
+            st.write(f'**secrets 有 github 區塊：** {bool(cfg)}')
+            st.write(f'**token 長度：** {len(token)}，開頭：`{token[:8] if token else "(空)"}...`')
+            st.write(f'**repo：** `{repo}`')
+            st.write(f'**branch：** `{branch}`')
+            if token and repo:
+                headers = {
+                    'Authorization': f'token {token}',
+                    'Accept': 'application/vnd.github.v3+json',
+                }
+                test_url = f'https://api.github.com/repos/{repo}'
+                try:
+                    r = requests.get(test_url, headers=headers, timeout=10)
+                    st.write(f'**GET /repos/{repo} → HTTP {r.status_code}**')
+                    if not r.ok:
+                        st.error(f'錯誤內容：{r.json().get("message", r.text[:200])}')
+                except Exception as e:
+                    st.error(f'連線例外：{type(e).__name__}: {e}')
+
+    # ── 篩選日期範圍（只影響分析，不改變日期分配的勾選）───────────────
+    st.markdown('**🔍 篩選日期範圍**')
+    st.caption('**只影響本次分析，不改變日期分配的勾選。** 事前、事後各自只計入範圍內已勾選的日期；'
+               '範圍外的勾選仍保留在日期分配表格，儲存日期分配時也照原本的勾選儲存，範圍放大即恢復計入。')
+    _first, _last = all_dates[0].date(), all_dates[-1].date()
+    range_before = st.date_input('事前範圍', value=(_first, _last), min_value=_first, max_value=_last,
+                                 key=f'range_before_{selected_site}')
+    range_after  = st.date_input('事後範圍', value=(_first, _last), min_value=_first, max_value=_last,
+                                 key=f'range_after_{selected_site}')
+
+    def _in_range(rng, d: pd.Timestamp) -> bool:
+        """日期是否在範圍內；範圍只選了起始日（尚未選完）時視為不篩選。"""
+        return len(rng) != 2 or rng[0] <= d.date() <= rng[1]
+
+    before_by_period: dict[str, list] = {}
+    after_by_period:  dict[str, list] = {}
+    for p in selected_periods:
+        sub = edited_df[edited_df['時段'] == p]
+        before_by_period[p] = [pd.Timestamp(r) for r in sub.loc[sub['事前'], '日期']]
+        after_by_period[p]  = [pd.Timestamp(r) for r in sub.loc[sub['事後'], '日期']]
+
+    # 篩選日期範圍：只從本次分析排除範圍外的勾選，edited_df（儲存用）不變
+    _n_out_before = _n_out_after = 0
+    for p in selected_periods:
+        _kept_b = [d for d in before_by_period[p] if _in_range(range_before, d)]
+        _kept_a = [d for d in after_by_period[p] if _in_range(range_after, d)]
+        _n_out_before += len(before_by_period[p]) - len(_kept_b)
+        _n_out_after  += len(after_by_period[p]) - len(_kept_a)
+        before_by_period[p], after_by_period[p] = _kept_b, _kept_a
+
+    # 已勾選的日期中有資料品質註記 → 告警；是否排除在「📆 日期分配表格」內設定
+    _sel_flags = dl.flagged_rows(quality_notes, {p: (before_by_period[p], after_by_period[p]) for p in selected_periods})
+    if _sel_flags:
+        _n_err = sum(r['等級'] != dl.QUALITY_WARN for r in _sel_flags)
+        st.warning(f'已勾選的日期中有 {len(_sel_flags)} 格有資料註記（{dl.flag_counts(_sel_flags)}）；'
+                   f'目前設定：{quality_mode}（可在「📆 日期分配表格」內調整）')
+        with st.expander('資料註記明細', expanded=_n_err > 0):
+            st.dataframe(pd.DataFrame(_sel_flags), hide_index=True, use_container_width=True)
+        for p in selected_periods:
+            before_by_period[p] = [d for d in before_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
+            after_by_period[p]  = [d for d in after_by_period[p] if not dl.is_excluded(quality_notes.get((d, p)), quality_mode)]
+
+    if selected_periods:
+        counts_str = '　'.join(
+            f"{_esc_md(p)}：事前{len(before_by_period[p])}／事後{len(after_by_period[p])}"
+            for p in selected_periods
+        )
+        st.caption(f'已選：{counts_str}')
+        if _n_out_before or _n_out_after:
+            st.info(f'依「🔍 篩選日期範圍」，表格中另有事前 {_n_out_before} 格、事後 {_n_out_after} 格勾選'
+                    '在範圍外，不計入本次分析（勾選仍保留，儲存時照原勾選儲存）。')
 
     st.divider()
 
